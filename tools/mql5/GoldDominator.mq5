@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//|                                                AurumRecovery.mq5  |
-//|   Aurum Recovery - a safer XAUUSD grid/recovery EA.               |
+//|                                                GoldDominator.mq5  |
+//|   Gold Dominator - a safer XAUUSD grid/recovery EA.               |
 //|                                                                  |
 //|   Clean-room re-implementation of the source martingale grid EA. |
 //|   The original ran with NO stop-loss (SL_=0). This reproduces its |
@@ -19,7 +19,7 @@
 //|   The exact entry trigger mirrors CONQUER_SignalProbe; confirm it |
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
-#property copyright "Aurum Recovery - Execution Desk"
+#property copyright "Gold Dominator - Execution Desk"
 #property version   "1.00"
 #property strict
 
@@ -66,11 +66,12 @@ input bool            InpTradeBuy    = true;        // Flag_Trade_Buy_
 input bool            InpTradeSell   = true;        // Flag_Trade_Sell_
 input double          InpInitialLot  = 0.01;        // Lot_Init_ (start lot)
 input bool            InpMartingaleMode = true;     // true = capped grid, false = single-shot fixed lot
-input double          InpMultiplier  = 1.89;        // Martin_
-input double          InpMaxLot      = 0.13;        // MaxLot_
+input bool            InpAutoMultiplier = true;     // AUTO-SOLVE the multiplier from start/max/positions
+input double          InpMultiplier  = 1.89;        // Martin_ (used only when AutoMultiplier=false)
+input double          InpMaxLot      = 0.13;        // MaxLot_ (target lot at the last position)
 input int             InpMaxPositions= 6;           // MaxOrders per direction
 input long            InpMagic       = 16082020;    // Magic
-input string          InpComment     = "AurumRecovery"; // order comment
+input string          InpComment     = "GoldDominator"; // order comment
 
 //==================== GRID DISTANCE ==============================
 input string          _s2            = "===== Grid distance ====="; // ---
@@ -104,6 +105,7 @@ input int             InpEndHour       = 0;         // End_Hour
 int      hStoch  = INVALID_HANDLE;
 int      hDragon = INVALID_HANDLE;
 int      hCustom = INVALID_HANDLE;
+double   g_multiplier = 1.89;   // effective martingale multiplier (auto-solved or manual)
 datetime g_lastBar = 0;
 datetime g_day     = 0;
 double   g_dayStartEquity = 0;
@@ -132,10 +134,47 @@ int OnInit()
       if(hDragon == INVALID_HANDLE) { Print("EMA proxy handle failed"); return(INIT_FAILED); }
      }
 
+   //--- lot-multiplier auto-solver: pick the multiplier so position N == MaxLot
+   g_multiplier = SolveMultiplier();
+   PrintLotLadder();
+
    g_day = DayStart(TimeCurrent());
    g_dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    g_equityPeak     = g_dayStartEquity;
    return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Auto-solve the multiplier from start lot, max lot, position count |
+//|   MaxLot = InitialLot * mult^(N-1)  ->  mult = (Max/Init)^(1/(N-1))|
+//| Falls back to the manual InpMultiplier when auto is off or inputs  |
+//| are degenerate.                                                    |
+//+------------------------------------------------------------------+
+double SolveMultiplier()
+  {
+   if(!InpAutoMultiplier)          return(InpMultiplier);
+   if(InpMaxPositions<=1)          return(1.0);            // single-shot: no growth
+   if(InpInitialLot<=0.0 || InpMaxLot<=InpInitialLot) return(1.0);
+   double m = MathPow(InpMaxLot/InpInitialLot, 1.0/(InpMaxPositions-1));
+   return(NormalizeDouble(m, 3));
+  }
+
+//+------------------------------------------------------------------+
+//| Log the resulting lot ladder and total exposure at startup.       |
+//+------------------------------------------------------------------+
+void PrintLotLadder()
+  {
+   double lot=InpInitialLot, total=0;
+   string line="";
+   for(int n=1; n<=InpMaxPositions; n++)
+     {
+      double norm=NormalizeLot(InpMartingaleMode ? lot : InpInitialLot);
+      total+=norm;
+      line+=StringFormat("#%d=%.2f ", n, norm);
+      lot*=g_multiplier;
+     }
+   PrintFormat("Gold Dominator ladder | mult=%.3f (%s) | %s| total=%.2f lots",
+               g_multiplier, (InpAutoMultiplier?"auto":"manual"), line, total);
   }
 
 void OnDeinit(const int reason)
@@ -394,7 +433,7 @@ void ManageDirection(int dir)
       double need=NextDistance(cnt);
       if(adversePts>=need)
         {
-         double lot=NormalizeLot(lLot*InpMultiplier);
+         double lot=NormalizeLot(lLot*g_multiplier);
          double sl=0;
          if(InpHardSLPoints>0)
             sl=(dir>0)?cur-InpHardSLPoints*_Point:cur+InpHardSLPoints*_Point;

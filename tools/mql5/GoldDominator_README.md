@@ -1,4 +1,4 @@
-# Aurum Recovery — safer XAUUSD grid EA
+# Gold Dominator — safer XAUUSD grid EA
 
 A clean-room MT5 Expert Advisor that reproduces the source EA's behaviour
 (Black Dragon M5 trend + Stochastic M15 trigger, distance grid, martingale
@@ -12,13 +12,13 @@ with any martingale. This replaces that with real kill-switches.
 
 ## Install (this one is an Expert Advisor, not an indicator)
 
-1. MT5 → **File → Open Data Folder** → put `AurumRecovery.mq5` in **`MQL5\Experts\`**.
+1. MT5 → **File → Open Data Folder** → put `GoldDominator.mq5` in **`MQL5\Experts\`**.
 2. MetaEditor → **F7** to compile → it appears in Navigator under *Expert Advisors*.
 3. Drag onto a chart, tick **Allow Algo Trading**.
 
 ## Safety: original vs this replica
 
-| Risk control | CONQUER original | Aurum Recovery |
+| Risk control | CONQUER original | Gold Dominator |
 |--------------|------------------|--------------|
 | Hard stop-loss per trade | ❌ `SL_=0` (none) | ✅ `InpHardSLPoints` (default 300) |
 | Basket money-stop (kills the whole cycle) | ❌ | ✅ `InpBasketMaxLoss` ($50) |
@@ -39,10 +39,39 @@ and halts trading until the next day (auto-resets at day rollover).
 - **`false` — single-shot:** no grid at all. One 0.01 position at a time with the hard
   SL/TP. Much lower risk, but behaves nothing like the original (no averaging).
 
+## Lot-multiplier auto-solver (`InpAutoMultiplier`)
+
+Instead of guessing the multiplier, set your **start lot**, **max lot**, and **how many
+positions** you want — the EA solves the multiplier so the last position lands exactly on
+your max lot:
+
+```
+multiplier = (MaxLot / InitialLot) ^ (1 / (MaxPositions − 1))
+```
+
+`InpAutoMultiplier=true` (default) computes it at startup and **ignores** `InpMultiplier`.
+The resulting ladder + total exposure are printed to the Experts log on init, e.g.:
+
+```
+Gold Dominator ladder | mult=1.670 (auto) | #1=0.01 #2=0.02 #3=0.03 #4=0.05 #5=0.08 #6=0.13 | total=0.32 lots
+```
+
+Worked examples for start 0.01 → max 0.13:
+
+| Positions | Auto multiplier | Ladder (rounded) |
+|-----------|-----------------|------------------|
+| 5 | **1.90** (≈ your original 1.89) | 0.01 · 0.02 · 0.04 · 0.07 · 0.13 |
+| 6 | **1.67** | 0.01 · 0.02 · 0.03 · 0.05 · 0.08 · 0.13 |
+| 7 | **1.51** | 0.01 · 0.02 · 0.02 · 0.04 · 0.06 · 0.09 · 0.13 |
+
+So more positions ⇒ smaller multiplier ⇒ gentler steps. To pin the exact 1.89 you had,
+either set `MaxPositions=5`, or turn `InpAutoMultiplier=false` and use `InpMultiplier=1.89`.
+
 ## Defaults (match your earlier request)
 
-`InitialLot=0.01`, `Multiplier=1.89`, `MaxLot=0.13`, `MaxPositions=6`, signal inputs
-mirror your `.set` (Stoch M15 7/1/2, 90/10; Black Dragon M5).
+`InitialLot=0.01`, `MaxLot=0.13`, `MaxPositions=6`, signal inputs mirror your `.set`
+(Stoch M15 7/1/2, 90/10; Black Dragon M5). With auto-solve on, 6 positions ⇒ multiplier
+≈ 1.67; set `MaxPositions=5` for the ≈1.89 you started with.
 
 ## Before trusting the entries
 
