@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
-//|                                                 CONQUER_Safe.mq5  |
-//|   Clean-room, safer re-implementation of the CONQUER EA.          |
+//|                                                AurumRecovery.mq5  |
+//|   Aurum Recovery - a safer XAUUSD grid/recovery EA.               |
 //|                                                                  |
-//|   The original CONQUER__EAEX5.ex5 is a martingale grid scalper    |
-//|   with NO stop-loss (SL_=0). This EA reproduces its *behaviour*   |
+//|   Clean-room re-implementation of the source martingale grid EA. |
+//|   The original ran with NO stop-loss (SL_=0). This reproduces its |
+//|   *behaviour*                                                    |
 //|   (Black Dragon M5 trend + Stochastic M15 trigger, distance grid, |
 //|   martingale sizing, basket take-profit) but adds the risk        |
 //|   controls the original lacks:                                    |
@@ -18,7 +19,7 @@
 //|   The exact entry trigger mirrors CONQUER_SignalProbe; confirm it |
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
-#property copyright "Execution Desk - safer CONQUER replica"
+#property copyright "Aurum Recovery - Execution Desk"
 #property version   "1.00"
 #property strict
 
@@ -69,7 +70,7 @@ input double          InpMultiplier  = 1.89;        // Martin_
 input double          InpMaxLot      = 0.13;        // MaxLot_
 input int             InpMaxPositions= 6;           // MaxOrders per direction
 input long            InpMagic       = 16082020;    // Magic
-input string          InpComment     = "CONQUER_Safe"; // order comment
+input string          InpComment     = "AurumRecovery"; // order comment
 
 //==================== GRID DISTANCE ==============================
 input string          _s2            = "===== Grid distance ====="; // ---

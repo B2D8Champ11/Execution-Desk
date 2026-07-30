@@ -1,6 +1,6 @@
-# CONQUER_Safe — safer replica EA
+# Aurum Recovery — safer XAUUSD grid EA
 
-A clean-room MT5 Expert Advisor that reproduces the CONQUER EA's behaviour
+A clean-room MT5 Expert Advisor that reproduces the source EA's behaviour
 (Black Dragon M5 trend + Stochastic M15 trigger, distance grid, martingale
 sizing, basket take-profit) **plus the risk controls the original doesn't have.**
 The original `.ex5` runs `SL_=0` — no stop-loss at all — which is the main danger
@@ -12,13 +12,13 @@ with any martingale. This replaces that with real kill-switches.
 
 ## Install (this one is an Expert Advisor, not an indicator)
 
-1. MT5 → **File → Open Data Folder** → put `CONQUER_Safe.mq5` in **`MQL5\Experts\`**.
+1. MT5 → **File → Open Data Folder** → put `AurumRecovery.mq5` in **`MQL5\Experts\`**.
 2. MetaEditor → **F7** to compile → it appears in Navigator under *Expert Advisors*.
 3. Drag onto a chart, tick **Allow Algo Trading**.
 
 ## Safety: original vs this replica
 
-| Risk control | CONQUER original | CONQUER_Safe |
+| Risk control | CONQUER original | Aurum Recovery |
 |--------------|------------------|--------------|
 | Hard stop-loss per trade | ❌ `SL_=0` (none) | ✅ `InpHardSLPoints` (default 300) |
 | Basket money-stop (kills the whole cycle) | ❌ | ✅ `InpBasketMaxLoss` ($50) |
