@@ -79,6 +79,9 @@ input double          InpMaxLot      = 0.13;        // MaxLot_ (target lot at th
 input int             InpMaxPositions= 6;           // MaxOrders per direction
 input long            InpMagic       = 16082020;    // Magic
 input string          InpComment     = "GoldDominator"; // order comment
+input string          _s1b           = "----- Account scaling -----"; // ---
+input bool            InpUseAutoLot  = false;       // scale lots & $ limits to account size
+input double          InpBalanceAnchor = 1000;      // the balance the lots/limits above are set for
 
 //==================== GRID DISTANCE ==============================
 input string          _s2            = "===== Grid distance ====="; // ---
@@ -113,6 +116,13 @@ int      hStoch  = INVALID_HANDLE;
 int      hDragon = INVALID_HANDLE;
 int      hCustom = INVALID_HANDLE;
 double   g_multiplier = 1.89;   // effective martingale multiplier (auto-solved or manual)
+//--- effective, account-scaled risk values (= inputs x g_scale)
+double   g_scale        = 1.0;  // balance / anchor  (1.0 when auto-lot off)
+double   g_initLot      = 0.01;
+double   g_maxLot       = 0.13;
+double   g_basketTP     = 5.0;
+double   g_basketMaxLoss= 50.0;
+double   g_dailyMaxLoss = 100.0;
 datetime g_lastBar = 0;
 datetime g_day     = 0;
 double   g_dayStartEquity = 0;
@@ -141,6 +151,18 @@ int OnInit()
       if(hDragon == INVALID_HANDLE) { Print("EMA proxy handle failed"); return(INIT_FAILED); }
      }
 
+   //--- account scaling: one factor scales lots AND $ limits together, so the
+   //    system behaves identically on any account size (percent limits already scale).
+   g_scale = 1.0;
+   if(InpUseAutoLot && InpBalanceAnchor > 0.0)
+      g_scale = AccountInfoDouble(ACCOUNT_BALANCE) / InpBalanceAnchor;
+   if(g_scale <= 0.0) g_scale = 1.0;
+   g_initLot       = InpInitialLot   * g_scale;
+   g_maxLot        = InpMaxLot        * g_scale;
+   g_basketTP      = InpBasketTPMoney * g_scale;
+   g_basketMaxLoss = InpBasketMaxLoss * g_scale;
+   g_dailyMaxLoss  = InpDailyMaxLoss  * g_scale;
+
    //--- lot-multiplier auto-solver: pick the multiplier so position N == MaxLot
    g_multiplier = SolveMultiplier();
    PrintFormat("Gold Dominator entry mode = %s",
@@ -166,8 +188,8 @@ double SolveMultiplier()
   {
    if(!InpAutoMultiplier)          return(InpMultiplier);
    if(InpMaxPositions<=1)          return(1.0);            // single-shot: no growth
-   if(InpInitialLot<=0.0 || InpMaxLot<=InpInitialLot) return(1.0);
-   double m = MathPow(InpMaxLot/InpInitialLot, 1.0/(InpMaxPositions-1));
+   if(g_initLot<=0.0 || g_maxLot<=g_initLot) return(1.0);
+   double m = MathPow(g_maxLot/g_initLot, 1.0/(InpMaxPositions-1)); // ratio same at any scale
    return(NormalizeDouble(m, 3));
   }
 
@@ -176,17 +198,19 @@ double SolveMultiplier()
 //+------------------------------------------------------------------+
 void PrintLotLadder()
   {
-   double lot=InpInitialLot, total=0;
+   double lot=g_initLot, total=0;
    string line="";
    for(int n=1; n<=InpMaxPositions; n++)
      {
-      double norm=NormalizeLot(InpMartingaleMode ? lot : InpInitialLot);
+      double norm=NormalizeLot(InpMartingaleMode ? lot : g_initLot);
       total+=norm;
       line+=StringFormat("#%d=%.2f ", n, norm);
       lot*=g_multiplier;
      }
-   PrintFormat("Gold Dominator ladder | mult=%.3f (%s) | %s| total=%.2f lots",
-               g_multiplier, (InpAutoMultiplier?"auto":"manual"), line, total);
+   PrintFormat("Gold Dominator ladder | scale=%.2fx (bal %.0f) | mult=%.3f (%s) | %s| total=%.2f lots | stops: TP %.0f / basket %.0f / daily %.0f",
+               g_scale, AccountInfoDouble(ACCOUNT_BALANCE), g_multiplier,
+               (InpAutoMultiplier?"auto":"manual"), line, total,
+               g_basketTP, g_basketMaxLoss, g_dailyMaxLoss);
   }
 
 void OnDeinit(const int reason)
@@ -328,7 +352,7 @@ double NormalizeLot(double lot)
    if(step<=0) step=0.01;
    lot=MathFloor(lot/step+0.5)*step;
    lot=MathMax(mn, MathMin(mx, lot));
-   lot=MathMin(lot, InpMaxLot);          // never exceed user cap
+   lot=MathMin(lot, g_maxLot);           // never exceed the (scaled) user cap
    return(NormalizeDouble(lot, 2));
   }
 
@@ -354,14 +378,14 @@ void OnTick()
 
    if(!g_haltedToday)
      {
-      bool moneyHit = InpUseDailyMoneyStop && dayLoss >= InpDailyMaxLoss;
+      bool moneyHit = InpUseDailyMoneyStop && dayLoss >= g_dailyMaxLoss;
       bool pctHit   = InpUseDailyPctStop   && ddPct   >= InpDailyMaxPct;
       if(moneyHit || pctHit)
         {
          CloseAllMagic();
          g_haltedToday=true;
          PrintFormat("SAFETY HALT for the day: dayLoss=%.2f (lim %.2f) dd=%.2f%% (lim %.2f%%)",
-                     dayLoss, InpDailyMaxLoss, ddPct, InpDailyMaxPct);
+                     dayLoss, g_dailyMaxLoss, ddPct, InpDailyMaxPct);
          return;
         }
      }
@@ -430,7 +454,7 @@ void TryScalpEntry()
 //+------------------------------------------------------------------+
 void OpenScalp(int dir)
   {
-   double lot=NormalizeLot(InpInitialLot);           // fresh scalps use the fixed base lot
+   double lot=NormalizeLot(g_initLot);               // fresh scalps use the (scaled) base lot
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl=0, tp=0;
    if(InpHardSLPoints>0)
@@ -453,7 +477,7 @@ bool SessionOpen()
 //+------------------------------------------------------------------+
 void OpenFirst(int dir)
   {
-   double lot=NormalizeLot(InpInitialLot);
+   double lot=NormalizeLot(g_initLot);
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl=0;
    if(InpHardSLPoints>0)
@@ -474,13 +498,13 @@ void ManageDirection(int dir)
    double bp=BasketProfitDir(dir);  // floating P/L for this direction's basket only
 
    //--- basket money-stop [SAFETY]: kill the cycle at max floating loss (BOTH modes)
-   if(InpUseBasketMoneyStop && bp<=-InpBasketMaxLoss){ CloseAllDir(dir); return; }
+   if(InpUseBasketMoneyStop && bp<=-g_basketMaxLoss){ CloseAllDir(dir); return; }
 
    //--- basket TAKE-PROFIT: cross mode only. In scalp mode each trade carries its
    //    own TP, so we don't force-close the batch on a small combined profit.
    if(InpEntryMode!=ENTRY_M5_TREND_SCALP)
      {
-      if(InpUseBasketTPMoney && bp>=InpBasketTPMoney){ CloseAllDir(dir); return; }
+      if(InpUseBasketTPMoney && bp>=g_basketTP){ CloseAllDir(dir); return; }
       if(!InpUseBasketTPMoney && InpTPPoints>0)
         {
          double cur=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);

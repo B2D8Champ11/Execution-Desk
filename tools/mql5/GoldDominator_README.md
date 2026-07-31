@@ -88,6 +88,30 @@ Worked examples for start 0.01 → max 0.13:
 So more positions ⇒ smaller multiplier ⇒ gentler steps. To pin the exact 1.89 you had,
 either set `MaxPositions=5`, or turn `InpAutoMultiplier=false` and use `InpMultiplier=1.89`.
 
+## Scaling to bigger accounts (`InpUseAutoLot`)
+
+Set the strategy once for a reference balance, then let it scale to any account size.
+One factor — `balance ÷ InpBalanceAnchor` — multiplies **both the lots and the dollar
+safety limits together**, so risk stays proportional and behaviour is identical at every size.
+
+- `InpUseAutoLot = false` (default) → uses the exact lots/limits you typed.
+- `InpUseAutoLot = true` with `InpBalanceAnchor = 1000` → the 0.01/0.13 lots and $5/$50/$100
+  limits are "per $1,000", and scale up from there:
+
+| Account | Scale | Start lot | Max lot | Basket TP | Basket stop | Daily stop |
+|---------|-------|-----------|---------|-----------|-------------|------------|
+| $1,000  | 1×    | 0.01 | 0.13 | $5  | $50  | $100 |
+| $10,000 | 10×   | 0.10 | 1.30 | $50 | $500 | $1,000 |
+| $100,000| 100×  | 1.00 | 13.0 | $500| $5,000 | $10,000 |
+
+The percent-based limit (`InpDailyMaxPct`, 5%) already scales on its own. The multiplier and
+position count are unchanged — only the size scales. The startup log prints the applied scale,
+e.g. `scale=10.00x (bal 10000) | ... | stops: TP 50 / basket 500 / daily 1000`.
+
+> Scale is read from account **balance at attach time**. Re-attach (or restart) to pick up a
+> new balance. Note that on a $100k account the martingale's *total* exposure scales up too —
+> keep `InpBasketMaxLoss`/`InpDailyMaxPct` sensible, and always demo-test at the new size first.
+
 ## Defaults (match your earlier request)
 
 `InitialLot=0.01`, `MaxLot=0.13`, `MaxPositions=6`, signal inputs mirror your `.set`
