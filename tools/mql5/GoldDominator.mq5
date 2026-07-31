@@ -39,9 +39,16 @@ enum ENUM_DRAGONMODE
    DRAGON_SLOPE = 0, // EMA rising = bull
    DRAGON_PRICE = 1  // Close vs EMA
   };
+enum ENUM_ENTRYMODE
+  {
+   ENTRY_SIGNAL_CROSS   = 0, // wait for a stochastic cross/level (passive, few trades/day)
+   ENTRY_M5_TREND_SCALP = 1  // enter every M5 bar with the trend (like the real GoldScalper)
+  };
 
 //==================== SIGNAL INPUTS (mirror .set) ==================
 input string          _s0            = "===== Signal ====="; // ---
+input ENUM_ENTRYMODE  InpEntryMode   = ENTRY_M5_TREND_SCALP; // HOW it enters (test both)
+input int             InpScalpTPPoints = 130;       // scalp mode: fixed TP per trade (points)
 input ENUM_TIMEFRAMES InpStochTF     = PERIOD_M15;  // TF_Stoh
 input int             InpK           = 7;           // KPeriod
 input int             InpD           = 1;           // DPeriod
@@ -136,6 +143,11 @@ int OnInit()
 
    //--- lot-multiplier auto-solver: pick the multiplier so position N == MaxLot
    g_multiplier = SolveMultiplier();
+   PrintFormat("Gold Dominator entry mode = %s",
+               (InpEntryMode==ENTRY_M5_TREND_SCALP)
+               ? StringFormat("M5 TREND SCALP (every %s bar, TP %d pts, stoch=filter)",
+                              EnumToString(InpDragonTF), InpScalpTPPoints)
+               : "SIGNAL CROSS (passive stochastic trigger)");
    PrintLotLadder();
 
    g_day = DayStart(TimeCurrent());
@@ -359,8 +371,10 @@ void OnTick()
    ManageDirection(+1);
    ManageDirection(-1);
 
-   //================= NEW SIGNAL (once per closed bar) ==============
-   datetime bar=(datetime)iTime(_Symbol, PERIOD_CURRENT, 0);
+   //================= NEW ENTRY (once per closed bar) ===============
+   // Scalp mode clocks off the M5 (Dragon) bar; cross mode off the chart bar.
+   ENUM_TIMEFRAMES entryTF = (InpEntryMode==ENTRY_M5_TREND_SCALP) ? InpDragonTF : PERIOD_CURRENT;
+   datetime bar=(datetime)iTime(_Symbol, entryTF, 0);
    if(bar==g_lastBar) return;
    g_lastBar=bar;
 
@@ -371,12 +385,60 @@ void OnTick()
       if(spr>InpMaxSpreadPts) return;
      }
 
-   int sig=Signal();
-   if(sig==0) return;
+   if(InpEntryMode==ENTRY_M5_TREND_SCALP)
+     {
+      TryScalpEntry();                               // enter every M5 bar with the trend
+     }
+   else
+     {
+      int sig=Signal();                              // passive: wait for a stochastic cross
+      if(sig==0) return;
+      int cnt; double vol,wavg,lLot,lPrice;
+      BasketInfo(sig, cnt, vol, wavg, lLot, lPrice);
+      if(cnt==0) OpenFirst(sig);                     // start a new cycle only on a signal
+     }
+  }
 
+//+------------------------------------------------------------------+
+//| M5 TREND SCALP: open a fresh scalp each M5 bar in the trend       |
+//| direction. Stochastic is a FILTER (skip when already exhausted),  |
+//| not the trigger. Each scalp gets its own small TP + the hard SL.  |
+//| Same safety net (basket-stop, daily limits) still applies.        |
+//+------------------------------------------------------------------+
+void TryScalpEntry()
+  {
+   int trend = DragonState();
+   if(trend == 0) return;                            // no clear trend -> stand aside
+   int dir = (trend > 0) ? +1 : -1;
+   if(dir>0 && !InpTradeBuy)  return;
+   if(dir<0 && !InpTradeSell) return;
+
+   //--- stochastic filter: don't pile in at the exhaustion extreme
+   double k[1];
+   if(CopyBuffer(hStoch, MAIN_LINE, 1, 1, k) < 1) return;
+   if(dir>0 && k[0] >= InpUpLevel)   return;         // already overbought -> no new buy
+   if(dir<0 && k[0] <= InpDownLevel) return;         // already oversold  -> no new sell
+
+   //--- respect the per-direction position cap
    int cnt; double vol,wavg,lLot,lPrice;
-   BasketInfo(sig, cnt, vol, wavg, lLot, lPrice);
-   if(cnt==0) OpenFirst(sig);                        // start a new cycle only on a signal
+   BasketInfo(dir, cnt, vol, wavg, lLot, lPrice);
+   if(cnt >= InpMaxPositions) return;
+
+   OpenScalp(dir);
+  }
+
+//+------------------------------------------------------------------+
+void OpenScalp(int dir)
+  {
+   double lot=NormalizeLot(InpInitialLot);           // fresh scalps use the fixed base lot
+   double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double sl=0, tp=0;
+   if(InpHardSLPoints>0)
+      sl=(dir>0)?price-InpHardSLPoints*_Point:price+InpHardSLPoints*_Point;
+   if(InpScalpTPPoints>0)
+      tp=(dir>0)?price+InpScalpTPPoints*_Point:price-InpScalpTPPoints*_Point;
+   if(dir>0) trade.Buy (lot,_Symbol,0,sl,tp,InpComment);
+   else      trade.Sell(lot,_Symbol,0,sl,tp,InpComment);
   }
 
 //+------------------------------------------------------------------+
@@ -411,18 +473,20 @@ void ManageDirection(int dir)
 
    double bp=BasketProfitDir(dir);  // floating P/L for this direction's basket only
 
-   //--- basket money take-profit
-   if(InpUseBasketTPMoney && bp>=InpBasketTPMoney){ CloseAllDir(dir); return; }
-
-   //--- basket money-stop [SAFETY]: kill the cycle at max floating loss
+   //--- basket money-stop [SAFETY]: kill the cycle at max floating loss (BOTH modes)
    if(InpUseBasketMoneyStop && bp<=-InpBasketMaxLoss){ CloseAllDir(dir); return; }
 
-   //--- points-based basket TP fallback (from weighted-average entry)
-   if(!InpUseBasketTPMoney && InpTPPoints>0)
+   //--- basket TAKE-PROFIT: cross mode only. In scalp mode each trade carries its
+   //    own TP, so we don't force-close the batch on a small combined profit.
+   if(InpEntryMode!=ENTRY_M5_TREND_SCALP)
      {
-      double cur=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-      double movePts=(dir>0)?(cur-wavg)/_Point:(wavg-cur)/_Point;
-      if(movePts>=InpTPPoints){ CloseAllDir(dir); return; }
+      if(InpUseBasketTPMoney && bp>=InpBasketTPMoney){ CloseAllDir(dir); return; }
+      if(!InpUseBasketTPMoney && InpTPPoints>0)
+        {
+         double cur=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         double movePts=(dir>0)?(cur-wavg)/_Point:(wavg-cur)/_Point;
+         if(movePts>=InpTPPoints){ CloseAllDir(dir); return; }
+        }
      }
 
    //--- grid add (only in martingale/grid mode)

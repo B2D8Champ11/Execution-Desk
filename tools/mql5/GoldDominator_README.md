@@ -39,6 +39,27 @@ and halts trading until the next day (auto-resets at day rollover).
 - **`false` — single-shot:** no grid at all. One 0.01 position at a time with the hard
   SL/TP. Much lower risk, but behaves nothing like the original (no averaging).
 
+## Entry modes (`InpEntryMode`) — test both
+
+Analysis of 960 real CONQUER fills (live account, June) showed the source EA is a
+**high-frequency M5 trend-scalper**: it enters on ~80% of M5 bars in the trend direction
+(median 5.0 min between entries, ~40 trades/day), banks a small fixed profit (~130 pts) in
+1–5 min, and uses martingale averaging only to rescue stuck legs. So there are two modes:
+
+- **`ENTRY_M5_TREND_SCALP` (default)** — the faithful replica. Every M5 bar, if Black Dragon
+  points a direction, open a fresh fixed-lot scalp with its own **TP (`InpScalpTPPoints`, 130)**
+  and hard SL. The **stochastic is a filter** (won't buy when already ≥ Up_Level, won't sell
+  when ≤ Down_Level), not the trigger. Trades often, like the real one.
+- **`ENTRY_SIGNAL_CROSS`** — the earlier passive mode. Waits for a stochastic cross at 90/10;
+  a handful of trades a day. Kept so you can compare.
+
+**Both modes keep every safety feature** — hard SL, basket money-stop, daily money/percent
+limits, equity halt, session/spread filters. In scalp mode the basket *take-profit* is off
+(each trade carries its own TP); the basket *money-stop* and all daily limits stay active.
+
+To test: run two charts (or two Strategy Tester passes) — same inputs, one on each
+`InpEntryMode` — and compare. The Experts log prints the active mode on startup.
+
 ## Lot-multiplier auto-solver (`InpAutoMultiplier`)
 
 Instead of guessing the multiplier, set your **start lot**, **max lot**, and **how many
