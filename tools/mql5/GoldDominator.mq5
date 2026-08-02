@@ -94,7 +94,12 @@ input string          _s3            = "===== Exits ====="; // ---
 input bool            InpUseBasketTPMoney = true;   // take-profit as a money target for the basket
 input double          InpBasketTPMoney = 5.0;       // $ profit to close the whole basket
 input int             InpTPPoints    = 100;         // fallback TP in points from avg entry (TP_)
-input int             InpHardSLPoints= 300;         // hard stop-loss per position (0 = none) [ADDED SAFETY]
+input int             InpHardSLPoints= 300;         // fixed hard stop-loss per position (0 = none)
+input bool            InpUseATRStop  = false;       // size the hard SL from ATR instead of fixed points
+input ENUM_TIMEFRAMES InpATRTimeframe= PERIOD_D1;   // ATR timeframe ("of the day" = D1)
+input int             InpATRPeriod   = 14;          // ATR period
+input double          InpATRMultiplier = 1.0;       // SL distance = this x ATR (1.0 = one daily range)
+input int             InpMinSLPoints = 50;          // floor so the ATR stop is never absurdly tight
 input bool            InpUseTrailing = true;        // trailing stop
 input int             InpTrailStart  = 0;           // iTS
 input int             InpTrailDist   = 100;         // iTD
@@ -115,6 +120,7 @@ input int             InpEndHour       = 0;         // End_Hour
 int      hStoch  = INVALID_HANDLE;
 int      hDragon = INVALID_HANDLE;
 int      hCustom = INVALID_HANDLE;
+int      hATR    = INVALID_HANDLE;
 double   g_multiplier = 1.89;   // effective martingale multiplier (auto-solved or manual)
 //--- effective, account-scaled risk values (= inputs x g_scale)
 double   g_scale        = 1.0;  // balance / anchor  (1.0 when auto-lot off)
@@ -138,6 +144,13 @@ int OnInit()
 
    hStoch = iStochastic(_Symbol, InpStochTF, InpK, InpD, InpSlowing, MODE_SMA, STO_LOWHIGH);
    if(hStoch == INVALID_HANDLE) { Print("Stoch handle failed"); return(INIT_FAILED); }
+
+   if(InpUseATRStop)
+     {
+      hATR = iATR(_Symbol, InpATRTimeframe, InpATRPeriod);
+      if(hATR == INVALID_HANDLE)
+         Print("WARNING ATR handle failed - falling back to fixed SL points");
+     }
 
    if(InpUseRealDragon)
      {
@@ -216,6 +229,7 @@ void PrintLotLadder()
 void OnDeinit(const int reason)
   {
    if(hStoch  != INVALID_HANDLE) IndicatorRelease(hStoch);
+   if(hATR    != INVALID_HANDLE) IndicatorRelease(hATR);
    if(hDragon != INVALID_HANDLE) IndicatorRelease(hDragon);
    if(hCustom != INVALID_HANDLE) IndicatorRelease(hCustom);
   }
@@ -452,13 +466,34 @@ void TryScalpEntry()
   }
 
 //+------------------------------------------------------------------+
+//| Current hard-SL distance in POINTS (0 = no stop). ATR mode:        |
+//| distance = InpATRMultiplier x ATR(InpATRTimeframe), floored by     |
+//| InpMinSLPoints; falls back to the fixed points if ATR isn't ready. |
+//+------------------------------------------------------------------+
+double HardSLPoints()
+  {
+   if(InpUseATRStop && hATR!=INVALID_HANDLE)
+     {
+      double a[1];
+      if(CopyBuffer(hATR, 0, 1, 1, a)==1 && a[0]>0.0)
+        {
+         double pts=(a[0]/_Point)*InpATRMultiplier;
+         if(pts < InpMinSLPoints) pts=InpMinSLPoints;
+         return(pts);
+        }
+     }
+   return((double)InpHardSLPoints);                  // fixed fallback (0 = none)
+  }
+
+//+------------------------------------------------------------------+
 void OpenScalp(int dir)
   {
    double lot=NormalizeLot(g_initLot);               // fresh scalps use the (scaled) base lot
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl=0, tp=0;
-   if(InpHardSLPoints>0)
-      sl=(dir>0)?price-InpHardSLPoints*_Point:price+InpHardSLPoints*_Point;
+   double slPts=HardSLPoints();
+   if(slPts>0)
+      sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
    if(InpScalpTPPoints>0)
       tp=(dir>0)?price+InpScalpTPPoints*_Point:price-InpScalpTPPoints*_Point;
    if(dir>0) trade.Buy (lot,_Symbol,0,sl,tp,InpComment);
@@ -480,8 +515,9 @@ void OpenFirst(int dir)
    double lot=NormalizeLot(g_initLot);
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl=0;
-   if(InpHardSLPoints>0)
-      sl=(dir>0)?price-InpHardSLPoints*_Point:price+InpHardSLPoints*_Point;
+   double slPts=HardSLPoints();
+   if(slPts>0)
+      sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
    if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
    else      trade.Sell(lot,_Symbol,0,sl,0,InpComment);
   }
@@ -523,8 +559,9 @@ void ManageDirection(int dir)
         {
          double lot=NormalizeLot(lLot*g_multiplier);
          double sl=0;
-         if(InpHardSLPoints>0)
-            sl=(dir>0)?cur-InpHardSLPoints*_Point:cur+InpHardSLPoints*_Point;
+         double slPts=HardSLPoints();
+         if(slPts>0)
+            sl=(dir>0)?cur-slPts*_Point:cur+slPts*_Point;
          if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
          else      trade.Sell(lot,_Symbol,0,sl,0,InpComment);
         }

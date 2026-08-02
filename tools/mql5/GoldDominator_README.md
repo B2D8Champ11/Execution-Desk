@@ -88,6 +88,24 @@ Worked examples for start 0.01 → max 0.13:
 So more positions ⇒ smaller multiplier ⇒ gentler steps. To pin the exact 1.89 you had,
 either set `MaxPositions=5`, or turn `InpAutoMultiplier=false` and use `InpMultiplier=1.89`.
 
+## ATR-based hard stop (`InpUseATRStop`)
+
+Instead of a fixed 300-point stop, size the hard SL from **volatility**, so it's wide in
+fast markets and tight in quiet ones:
+
+```
+SL distance = InpATRMultiplier x ATR(InpATRTimeframe)   (floored by InpMinSLPoints)
+```
+
+- `InpUseATRStop = false` (default) → fixed `InpHardSLPoints`.
+- `InpUseATRStop = true`, `InpATRTimeframe = D1`, `InpATRMultiplier = 1.0` → the stop is **one
+  average daily range** away — a genuine *disaster brake* on stuck martingale legs (the original
+  had none). Use a smaller multiplier (0.3–0.5) for a tighter scalp stop.
+- Falls back to the fixed points if ATR data isn't ready yet, so it never opens with no stop.
+
+The stop applies to every entry (first, scalp, and grid adds). Because ATR is in price, the
+point distance auto-adjusts to your broker's gold digits.
+
 ## Scaling to bigger accounts (`InpUseAutoLot`)
 
 Set the strategy once for a reference balance, then let it scale to any account size.
