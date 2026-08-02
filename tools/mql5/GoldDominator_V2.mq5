@@ -77,7 +77,7 @@ input bool            InpAutoMultiplier = true;     // AUTO-SOLVE the multiplier
 input double          InpMultiplier  = 1.89;        // Martin_ (used only when AutoMultiplier=false)
 input double          InpMaxLot      = 0.13;        // MaxLot_ (target lot at the last position)
 input int             InpMaxPositions= 6;           // MaxOrders per direction
-input long            InpMagic       = 16082021;    // Magic (DIFFERENT from V1 so they don't clash)
+input long            InpMagic       = 16082021;    // Magic (unique per variant so they don't clash)
 input string          InpComment     = "GoldDominatorV2"; // order comment
 input string          _s1b           = "----- Account scaling -----"; // ---
 input bool            InpUseAutoLot  = false;       // scale lots & $ limits to account size
@@ -100,6 +100,9 @@ input ENUM_TIMEFRAMES InpATRTimeframe= PERIOD_D1;   // ATR timeframe ("of the da
 input int             InpATRPeriod   = 14;          // ATR period
 input double          InpATRMultiplier = 1.0;       // SL distance = this x ATR (1.0 = one daily range)
 input int             InpMinSLPoints = 50;          // floor so the ATR stop is never absurdly tight
+input bool            InpUseATRTP    = false;       // size the scalp TP from ATR instead of fixed points
+input double          InpATRTPMultiplier = 0.25;    // TP distance = this x ATR (uses InpATRTimeframe/Period)
+input int             InpMinTPPoints = 30;          // floor for the ATR take-profit
 input bool            InpUseTrailing = true;        // trailing stop
 input int             InpTrailStart  = 0;           // iTS
 input int             InpTrailDist   = 100;         // iTD
@@ -145,11 +148,11 @@ int OnInit()
    hStoch = iStochastic(_Symbol, InpStochTF, InpK, InpD, InpSlowing, MODE_SMA, STO_LOWHIGH);
    if(hStoch == INVALID_HANDLE) { Print("Stoch handle failed"); return(INIT_FAILED); }
 
-   if(InpUseATRStop)
+   if(InpUseATRStop || InpUseATRTP)
      {
       hATR = iATR(_Symbol, InpATRTimeframe, InpATRPeriod);
       if(hATR == INVALID_HANDLE)
-         Print("WARNING ATR handle failed - falling back to fixed SL points");
+         Print("WARNING ATR handle failed - falling back to fixed SL/TP points");
      }
 
    if(InpUseRealDragon)
@@ -486,6 +489,25 @@ double HardSLPoints()
   }
 
 //+------------------------------------------------------------------+
+//| Current scalp TP distance in POINTS (0 = none). ATR mode:         |
+//| distance = InpATRTPMultiplier x ATR, floored by InpMinTPPoints.   |
+//+------------------------------------------------------------------+
+double ScalpTPPoints()
+  {
+   if(InpUseATRTP && hATR!=INVALID_HANDLE)
+     {
+      double a[1];
+      if(CopyBuffer(hATR, 0, 1, 1, a)==1 && a[0]>0.0)
+        {
+         double pts=(a[0]/_Point)*InpATRTPMultiplier;
+         if(pts < InpMinTPPoints) pts=InpMinTPPoints;
+         return(pts);
+        }
+     }
+   return((double)InpScalpTPPoints);                 // fixed fallback
+  }
+
+//+------------------------------------------------------------------+
 void OpenScalp(int dir)
   {
    double lot=NormalizeLot(g_initLot);               // fresh scalps use the (scaled) base lot
@@ -494,8 +516,9 @@ void OpenScalp(int dir)
    double slPts=HardSLPoints();
    if(slPts>0)
       sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
-   if(InpScalpTPPoints>0)
-      tp=(dir>0)?price+InpScalpTPPoints*_Point:price-InpScalpTPPoints*_Point;
+   double tpPts=ScalpTPPoints();
+   if(tpPts>0)
+      tp=(dir>0)?price+tpPts*_Point:price-tpPts*_Point;
    if(dir>0) trade.Buy (lot,_Symbol,0,sl,tp,InpComment);
    else      trade.Sell(lot,_Symbol,0,sl,tp,InpComment);
   }

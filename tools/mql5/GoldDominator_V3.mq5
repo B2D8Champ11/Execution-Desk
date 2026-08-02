@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
-//|                                                GoldDominator.mq5  |
-//|   Gold Dominator - a safer XAUUSD grid/recovery EA.               |
+//|                                             GoldDominator_V3.mq5  |
+//|   Gold Dominator V3 - safer XAUUSD scalp/grid EA (session-tuned). |
 //|                                                                  |
 //|   Clean-room re-implementation of the source martingale grid EA. |
 //|   The original ran with NO stop-loss (SL_=0). This reproduces its |
@@ -19,7 +19,7 @@
 //|   The exact entry trigger mirrors CONQUER_SignalProbe; confirm it |
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
-#property copyright "Gold Dominator - Execution Desk"
+#property copyright "Gold Dominator V3 - Execution Desk"
 #property version   "1.00"
 #property strict
 
@@ -77,8 +77,8 @@ input bool            InpAutoMultiplier = true;     // AUTO-SOLVE the multiplier
 input double          InpMultiplier  = 1.89;        // Martin_ (used only when AutoMultiplier=false)
 input double          InpMaxLot      = 0.13;        // MaxLot_ (target lot at the last position)
 input int             InpMaxPositions= 6;           // MaxOrders per direction
-input long            InpMagic       = 16082020;    // Magic
-input string          InpComment     = "GoldDominator"; // order comment
+input long            InpMagic       = 16082022;    // Magic (unique per variant so they don't clash)
+input string          InpComment     = "GoldDominatorV3"; // order comment
 input string          _s1b           = "----- Account scaling -----"; // ---
 input bool            InpUseAutoLot  = false;       // scale lots & $ limits to account size
 input double          InpBalanceAnchor = 1000;      // the balance the lots/limits above are set for
@@ -95,12 +95,12 @@ input bool            InpUseBasketTPMoney = true;   // take-profit as a money ta
 input double          InpBasketTPMoney = 5.0;       // $ profit to close the whole basket
 input int             InpTPPoints    = 100;         // fallback TP in points from avg entry (TP_)
 input int             InpHardSLPoints= 300;         // fixed hard stop-loss per position (0 = none)
-input bool            InpUseATRStop  = false;       // size the hard SL from ATR instead of fixed points
+input bool            InpUseATRStop  = true;        // size the hard SL from ATR instead of fixed points
 input ENUM_TIMEFRAMES InpATRTimeframe= PERIOD_D1;   // ATR timeframe ("of the day" = D1)
 input int             InpATRPeriod   = 14;          // ATR period
 input double          InpATRMultiplier = 1.0;       // SL distance = this x ATR (1.0 = one daily range)
 input int             InpMinSLPoints = 50;          // floor so the ATR stop is never absurdly tight
-input bool            InpUseATRTP    = false;       // size the scalp TP from ATR instead of fixed points
+input bool            InpUseATRTP    = true;        // size the scalp TP from ATR instead of fixed points
 input double          InpATRTPMultiplier = 0.25;    // TP distance = this x ATR (uses InpATRTimeframe/Period)
 input int             InpMinTPPoints = 30;          // floor for the ATR take-profit
 input bool            InpUseTrailing = true;        // trailing stop
@@ -116,8 +116,8 @@ input double          InpDailyMaxLoss  = 100.0;     // $ daily loss limit
 input bool            InpUseDailyPctStop = true;    // halt for the day at a % drawdown
 input double          InpDailyMaxPct   = 5.0;       // % of day-start equity
 input int             InpMaxSpreadPts  = 0;         // MaxSpred (0 = ignore)
-input int             InpStartHour     = 0;         // Start_Hour (0/0 = all day)
-input int             InpEndHour       = 0;         // End_Hour
+input int             InpStartHour     = 9;         // Start_Hour (matches real EA: 09:00 server)
+input int             InpEndHour       = 12;        // End_Hour   (real EA stops entries ~12:00)
 
 //==================== STATE ======================================
 int      hStoch  = INVALID_HANDLE;

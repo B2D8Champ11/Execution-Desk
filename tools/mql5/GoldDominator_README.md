@@ -106,6 +106,31 @@ SL distance = InpATRMultiplier x ATR(InpATRTimeframe)   (floored by InpMinSLPoin
 The stop applies to every entry (first, scalp, and grid adds). Because ATR is in price, the
 point distance auto-adjusts to your broker's gold digits.
 
+### ATR take-profit (`InpUseATRTP`)
+
+The scalp target can scale with volatility too:
+
+```
+TP distance = InpATRTPMultiplier x ATR(InpATRTimeframe)   (floored by InpMinTPPoints)
+```
+
+`InpUseATRTP = true` replaces the fixed `InpScalpTPPoints`. The **ratio of the two multipliers
+sets your risk:reward**, independent of how volatile the day is:
+- `InpATRMultiplier = 1.0`, `InpATRTPMultiplier = 0.25` → wide stop / small target (martingale style)
+- `InpATRMultiplier = 0.5`, `InpATRTPMultiplier = 0.5` → 1:1 R:R that breathes with volatility (safer style)
+
+## The three variants (run side by side)
+
+Each is a separate file with a **unique Magic number**, so they never touch each other's trades:
+
+| File | Magic | Session | ATR SL/TP | Purpose |
+|------|-------|---------|-----------|---------|
+| `GoldDominator`    | 16082020 | all day | off | V1 — baseline |
+| `GoldDominator_V2` | 16082021 | 09:00–12:00 | off | session-tuned replica |
+| `GoldDominator_V3` | 16082022 | 09:00–12:00 | **on** | volatility-adaptive (ATR stop + ATR TP) |
+
+Put all three in `MQL5\Experts`, compile each (F7), and attach to separate charts to compare.
+
 ## Scaling to bigger accounts (`InpUseAutoLot`)
 
 Set the strategy once for a reference balance, then let it scale to any account size.
