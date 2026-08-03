@@ -108,11 +108,19 @@ point distance auto-adjusts to your broker's gold digits.
 
 ### ATR take-profit (`InpUseATRTP`)
 
-The scalp target can scale with volatility too:
+The scalp target can scale with volatility too. It uses its **own intraday timeframe**
+(`InpATRTPTimeframe`, default M15) so the target stays scalp-sized — using the *daily* ATR
+here makes the TP thousands of points away and it never fills:
 
 ```
-TP distance = InpATRTPMultiplier x ATR(InpATRTimeframe)   (floored by InpMinTPPoints)
+TP distance = InpATRTPMultiplier x ATR(InpATRTPTimeframe)   (floored by InpMinTPPoints)
 ```
+
+> **Trailing-stop fix (v1.01):** the trailing stop now only moves once a trade is in profit by
+> more than `InpTrailDist`, and never locks a stop worse than break-even. With the old code,
+> `InpTrailStart=0` + `InpTrailDist=100` pulled the stop to ~$1 above entry at break-even and
+> noise-stopped almost every trade for a small loss. If you're on an older compile, set
+> `InpUseTrailing=false` as an immediate workaround.
 
 `InpUseATRTP = true` replaces the fixed `InpScalpTPPoints`. The **ratio of the two multipliers
 sets your risk:reward**, independent of how volatile the day is:

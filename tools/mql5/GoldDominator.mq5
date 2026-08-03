@@ -101,7 +101,8 @@ input int             InpATRPeriod   = 14;          // ATR period
 input double          InpATRMultiplier = 1.0;       // SL distance = this x ATR (1.0 = one daily range)
 input int             InpMinSLPoints = 50;          // floor so the ATR stop is never absurdly tight
 input bool            InpUseATRTP    = false;       // size the scalp TP from ATR instead of fixed points
-input double          InpATRTPMultiplier = 0.25;    // TP distance = this x ATR (uses InpATRTimeframe/Period)
+input ENUM_TIMEFRAMES InpATRTPTimeframe = PERIOD_M15; // ATR TF for the TP (intraday, so it's scalp-sized)
+input double          InpATRTPMultiplier = 0.5;     // TP distance = this x ATR(InpATRTPTimeframe)
 input int             InpMinTPPoints = 30;          // floor for the ATR take-profit
 input bool            InpUseTrailing = true;        // trailing stop
 input int             InpTrailStart  = 0;           // iTS
@@ -123,7 +124,8 @@ input int             InpEndHour       = 0;         // End_Hour
 int      hStoch  = INVALID_HANDLE;
 int      hDragon = INVALID_HANDLE;
 int      hCustom = INVALID_HANDLE;
-int      hATR    = INVALID_HANDLE;
+int      hATR    = INVALID_HANDLE;   // ATR for the stop (InpATRTimeframe)
+int      hATRtp  = INVALID_HANDLE;   // ATR for the TP  (InpATRTPTimeframe, intraday)
 double   g_multiplier = 1.89;   // effective martingale multiplier (auto-solved or manual)
 //--- effective, account-scaled risk values (= inputs x g_scale)
 double   g_scale        = 1.0;  // balance / anchor  (1.0 when auto-lot off)
@@ -148,11 +150,17 @@ int OnInit()
    hStoch = iStochastic(_Symbol, InpStochTF, InpK, InpD, InpSlowing, MODE_SMA, STO_LOWHIGH);
    if(hStoch == INVALID_HANDLE) { Print("Stoch handle failed"); return(INIT_FAILED); }
 
-   if(InpUseATRStop || InpUseATRTP)
+   if(InpUseATRStop)
      {
       hATR = iATR(_Symbol, InpATRTimeframe, InpATRPeriod);
       if(hATR == INVALID_HANDLE)
-         Print("WARNING ATR handle failed - falling back to fixed SL/TP points");
+         Print("WARNING ATR(stop) handle failed - falling back to fixed SL points");
+     }
+   if(InpUseATRTP)
+     {
+      hATRtp = iATR(_Symbol, InpATRTPTimeframe, InpATRPeriod);
+      if(hATRtp == INVALID_HANDLE)
+         Print("WARNING ATR(tp) handle failed - falling back to fixed TP points");
      }
 
    if(InpUseRealDragon)
@@ -233,6 +241,7 @@ void OnDeinit(const int reason)
   {
    if(hStoch  != INVALID_HANDLE) IndicatorRelease(hStoch);
    if(hATR    != INVALID_HANDLE) IndicatorRelease(hATR);
+   if(hATRtp  != INVALID_HANDLE) IndicatorRelease(hATRtp);
    if(hDragon != INVALID_HANDLE) IndicatorRelease(hDragon);
    if(hCustom != INVALID_HANDLE) IndicatorRelease(hCustom);
   }
@@ -494,10 +503,10 @@ double HardSLPoints()
 //+------------------------------------------------------------------+
 double ScalpTPPoints()
   {
-   if(InpUseATRTP && hATR!=INVALID_HANDLE)
+   if(InpUseATRTP && hATRtp!=INVALID_HANDLE)
      {
       double a[1];
-      if(CopyBuffer(hATR, 0, 1, 1, a)==1 && a[0]>0.0)
+      if(CopyBuffer(hATRtp, 0, 1, 1, a)==1 && a[0]>0.0)
         {
          double pts=(a[0]/_Point)*InpATRTPMultiplier;
          if(pts < InpMinTPPoints) pts=InpMinTPPoints;
@@ -637,8 +646,14 @@ void TrailDirection(int dir)
       double open=PositionGetDouble(POSITION_PRICE_OPEN);
       double sl  =PositionGetDouble(POSITION_SL);
       double profitPts=(dir>0)?(cur-open)/_Point:(open-cur)/_Point;
-      if(profitPts<InpTrailStart) continue;
+      //--- must be in profit by MORE than the trail distance, otherwise the
+      //    locked stop would sit at a loss and noise-stop the trade (the V3 bug).
+      if(profitPts < InpTrailStart)   continue;
+      if(profitPts <= InpTrailDist)   continue;
       double newSL=(dir>0)?cur-InpTrailDist*_Point:cur+InpTrailDist*_Point;
+      //--- never lock worse than break-even
+      if(dir>0 && newSL<open) newSL=open;
+      if(dir<0 && newSL>open) newSL=open;
       bool better=(dir>0)?(sl==0 || newSL>sl):(sl==0 || newSL<sl);
       if(better) trade.PositionModify(tk, NormalizeDouble(newSL,_Digits), PositionGetDouble(POSITION_TP));
      }
