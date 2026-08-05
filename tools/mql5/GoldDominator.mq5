@@ -44,6 +44,11 @@ enum ENUM_ENTRYMODE
    ENTRY_SIGNAL_CROSS   = 0, // wait for a stochastic cross/level (passive, few trades/day)
    ENTRY_M5_TREND_SCALP = 1  // enter every M5 bar with the trend (like the real GoldScalper)
   };
+enum ENUM_SRMODE
+  {
+   SR_DAILY_PIVOTS = 0,   // classic pivot P/S1/S2/S3/R1/R2/R3 from the prior day's H/L/C
+   SR_SWING_LEVELS = 1    // recent swing highs/lows (fractal-style) over a lookback window
+  };
 
 //==================== SIGNAL INPUTS (mirror .set) ==================
 input string          _s0            = "===== Signal ====="; // ---
@@ -66,6 +71,12 @@ input ENUM_DRAGONMODE InpDragonMode  = DRAGON_SLOPE;// proxy trend rule
 input int             InpDragonPeriod= 20;          // proxy EMA period
 input ENUM_MA_METHOD  InpDragonMethod= MODE_EMA;    // proxy MA method
 input ENUM_APPLIED_PRICE InpDragonPrice = PRICE_CLOSE; // proxy MA price
+
+input string          _sSR           = "----- Support/Resistance filter -----"; // ---
+input bool            InpUseSRFilter = false;       // only enter near a pivot S/R zone
+input ENUM_SRMODE     InpSRMode      = SR_DAILY_PIVOTS; // which levels to use
+input int             InpSRZonePts   = 150;         // "near" = within this many points of a level
+input bool            InpDrawSRLines = true;        // draw the levels on the chart (visual/debug)
 
 //==================== TRADE / SIZING ==============================
 input string          _s1            = "===== Position sizing ====="; // ---
@@ -244,6 +255,7 @@ void OnDeinit(const int reason)
    if(hATRtp  != INVALID_HANDLE) IndicatorRelease(hATRtp);
    if(hDragon != INVALID_HANDLE) IndicatorRelease(hDragon);
    if(hCustom != INVALID_HANDLE) IndicatorRelease(hCustom);
+   for(int i=0;i<20;i++) ObjectDelete(0, "SRLevel_"+IntegerToString(i));
   }
 
 //+------------------------------------------------------------------+
@@ -276,6 +288,134 @@ int DragonState()
    double cl[1];
    if(CopyClose(_Symbol, InpDragonTF, 1, 1, cl) < 1) return(0);
    return(cl[0] > ema[1] ? +1 : (cl[0] < ema[1] ? -1 : 0));
+  }
+
+//+------------------------------------------------------------------+
+//| SUPPORT / RESISTANCE FILTER                                       |
+//|                                                                    |
+//| Purpose: the base entry (trend + stochastic-filter, every M5 bar)  |
+//| is indiscriminate about WHERE it enters. This filter only lets a   |
+//| buy through near a support level, and a sell through near a        |
+//| resistance level - the same logic a discretionary trader uses      |
+//| pivot/swing zones for. It changes nothing about sizing, exits, or  |
+//| the martingale/safety code below - it's purely an extra entry gate.|
+//+------------------------------------------------------------------+
+double g_srLevels[7];      // up to 7 levels (pivots: S3,S2,S1,P,R1,R2,R3)
+int    g_srCount = 0;
+datetime g_srCalcDay = 0;  // recompute once per new day
+
+//+------------------------------------------------------------------+
+//| Classic floor-trader pivots from the PRIOR completed daily bar.    |
+//| P = (H+L+C)/3 ; R1/S1, R2/S2, R3/S3 per the standard formula.      |
+//+------------------------------------------------------------------+
+void ComputeDailyPivots()
+  {
+   g_srCount = 0;
+   double h[1], l[1], c[1];
+   if(CopyHigh (_Symbol, PERIOD_D1, 1, 1, h) < 1) return;
+   if(CopyLow  (_Symbol, PERIOD_D1, 1, 1, l) < 1) return;
+   if(CopyClose(_Symbol, PERIOD_D1, 1, 1, c) < 1) return;
+   double H=h[0], L=l[0], C=c[0];
+   double P = (H+L+C)/3.0;
+   double R1 = 2*P-L,        S1 = 2*P-H;
+   double R2 = P+(H-L),      S2 = P-(H-L);
+   double R3 = H+2*(P-L),    S3 = L-2*(H-P);
+   double lv[7] = {S3,S2,S1,P,R1,R2,R3};
+   for(int i=0;i<7;i++) g_srLevels[i]=lv[i];
+   g_srCount = 7;
+  }
+
+//+------------------------------------------------------------------+
+//| Recent swing highs/lows (simple fractal: a bar whose high/low is   |
+//| the extreme of its InpSRSwingLookback-bar neighbourhood on each    |
+//| side). Cheaper alternative to pivots; adapts to recent structure   |
+//| instead of yesterday's range.                                     |
+//+------------------------------------------------------------------+
+void ComputeSwingLevels()
+  {
+   g_srCount = 0;
+   int lookback = 5;                 // bars each side to confirm a fractal
+   int scanBars = 200;                // how far back to search for swings
+   int total = MathMin(scanBars, iBars(_Symbol, PERIOD_H1)-lookback*2-2);
+   if(total <= 0) return;
+
+   double hi[], lo[];
+   if(CopyHigh(_Symbol, PERIOD_H1, 1, total+lookback*2, hi) < total) return;
+   if(CopyLow (_Symbol, PERIOD_H1, 1, total+lookback*2, lo) < total) return;
+   ArraySetAsSeries(hi, false);
+   ArraySetAsSeries(lo, false);
+
+   for(int i=lookback; i<total && g_srCount<7; i++)
+     {
+      bool isHigh=true, isLow=true;
+      for(int j=1;j<=lookback;j++)
+        {
+         if(hi[i] <= hi[i-j] || hi[i] <= hi[i+j]) isHigh=false;
+         if(lo[i] >= lo[i-j] || lo[i] >= lo[i+j]) isLow=false;
+        }
+      if(isHigh) g_srLevels[g_srCount++] = hi[i];
+      if(isLow && g_srCount<7) g_srLevels[g_srCount++] = lo[i];
+     }
+  }
+
+//+------------------------------------------------------------------+
+void RefreshSRLevels()
+  {
+   datetime today = DayStart(TimeCurrent());
+   if(today == g_srCalcDay) return;    // already computed today
+   g_srCalcDay = today;
+
+   if(InpSRMode == SR_DAILY_PIVOTS) ComputeDailyPivots();
+   else                             ComputeSwingLevels();
+
+   if(InpDrawSRLines) DrawSRLines();
+  }
+
+//+------------------------------------------------------------------+
+void DrawSRLines()
+  {
+   for(int i=0;i<20;i++) ObjectDelete(0, "SRLevel_"+IntegerToString(i));
+   for(int i=0;i<g_srCount;i++)
+     {
+      string name = "SRLevel_"+IntegerToString(i);
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, g_srLevels[i]);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clrGoldenrod);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Is `price` within InpSRZonePts of ANY computed S/R level?          |
+//+------------------------------------------------------------------+
+bool NearAnySRLevel(double price)
+  {
+   double zone = InpSRZonePts * _Point;
+   for(int i=0;i<g_srCount;i++)
+      if(MathAbs(price - g_srLevels[i]) <= zone) return(true);
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Entry gate: for a BUY, price must be near a level that sits AT or  |
+//| BELOW current price (support); for a SELL, near a level AT or      |
+//| ABOVE current price (resistance). Keeps buys off resistance and    |
+//| sells off support, not just "near any line".                       |
+//+------------------------------------------------------------------+
+bool SRAllowsEntry(int dir, double price)
+  {
+   if(!InpUseSRFilter) return(true);       // filter disabled -> no restriction
+   RefreshSRLevels();
+   if(g_srCount == 0) return(true);        // no levels yet (e.g. not enough history) -> don't block
+   double zone = InpSRZonePts * _Point;
+   for(int i=0;i<g_srCount;i++)
+     {
+      double lv = g_srLevels[i];
+      if(MathAbs(price - lv) > zone) continue;
+      if(dir>0 && lv <= price+zone) return(true);   // buy near/below price = support
+      if(dir<0 && lv >= price-zone) return(true);   // sell near/above price = resistance
+     }
+   return(false);
   }
 
 //+------------------------------------------------------------------+
@@ -445,7 +585,11 @@ void OnTick()
       if(sig==0) return;
       int cnt; double vol,wavg,lLot,lPrice;
       BasketInfo(sig, cnt, vol, wavg, lLot, lPrice);
-      if(cnt==0) OpenFirst(sig);                     // start a new cycle only on a signal
+      if(cnt==0)
+        {
+         double price=(sig>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         if(SRAllowsEntry(sig, price)) OpenFirst(sig); // start a new cycle only on a signal near S/R
+        }
      }
   }
 
@@ -473,6 +617,10 @@ void TryScalpEntry()
    int cnt; double vol,wavg,lLot,lPrice;
    BasketInfo(dir, cnt, vol, wavg, lLot, lPrice);
    if(cnt >= InpMaxPositions) return;
+
+   //--- S/R filter: only buy near support, only sell near resistance
+   double price = (dir>0) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(!SRAllowsEntry(dir, price)) return;
 
    OpenScalp(dir);
   }

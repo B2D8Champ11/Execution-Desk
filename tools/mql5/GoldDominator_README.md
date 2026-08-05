@@ -139,6 +139,29 @@ Each is a separate file with a **unique Magic number**, so they never touch each
 
 Put all three in `MQL5\Experts`, compile each (F7), and attach to separate charts to compare.
 
+## Support/Resistance entry filter (`InpUseSRFilter`)
+
+Backtesting showed the base entry (trend + stochastic-filter, every M5 bar) makes real money
+in trending stretches but bleeds in chop — it enters **anywhere**, good location or bad. This
+filter adds a location gate on top, without touching sizing, exits, or the martingale code:
+
+> **Buy only near a support level. Sell only near a resistance level.**
+
+- `InpUseSRFilter = false` (default) — off, entries unchanged.
+- `InpSRMode`:
+  - **`SR_DAILY_PIVOTS`** (default) — classic floor-trader pivots (P, S1–S3, R1–R3) computed
+    once per day from the **prior day's** high/low/close. Deterministic, no repainting.
+  - **`SR_SWING_LEVELS`** — recent fractal swing highs/lows over the last ~200 H1 bars.
+    Adapts to current structure instead of yesterday's fixed range.
+- `InpSRZonePts` (default 150) — how close price must be to a level to count as "near" it.
+- `InpDrawSRLines` — plots the levels as dotted gold horizontal lines on the chart, so you can
+  see visually why a bar was skipped.
+
+This only **gates** entries (skips bars where price isn't near a qualifying level) — it never
+adds a new reason to enter. Turning it on will reduce trade count. Compare
+`InpUseSRFilter=false` vs `true` in Strategy Tester, same dates, to see whether cutting the
+"bad location" entries improves the flat/choppy stretches without giving up the trending gains.
+
 ## Scaling to bigger accounts (`InpUseAutoLot`)
 
 Set the strategy once for a reference balance, then let it scale to any account size.
