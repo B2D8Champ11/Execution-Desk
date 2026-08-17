@@ -20,7 +20,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Gold Dominator V3_R2 - Execution Desk"
-#property version   "1.20"
+#property version   "1.30"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -77,6 +77,9 @@ input bool            InpUseSRFilter = false;       // only enter near a pivot S
 input ENUM_SRMODE     InpSRMode      = SR_DAILY_PIVOTS; // which levels to use
 input int             InpSRZonePts   = 150;         // "near" = within this many points of a level
 input bool            InpDrawSRLines = true;        // draw the levels on the chart (visual/debug)
+input bool            InpUseSRStop   = false;       // place the hard SL just beyond the nearest S/R level
+input int             InpSRStopBufferPts = 50;      // extra room beyond the level, so a touch isn't a break
+input int             InpSRStopMaxPts    = 2000;    // ignore a level farther than this (falls back to ATR/fixed)
 
 //==================== TRADE / SIZING ==============================
 input string          _s1            = "===== Position sizing ====="; // ---
@@ -205,6 +208,10 @@ int OnInit()
                ? StringFormat("M5 TREND SCALP (every %s bar, TP %d pts, stoch=filter)",
                               EnumToString(InpDragonTF), InpScalpTPPoints)
                : "SIGNAL CROSS (passive stochastic trigger)");
+   if(InpUseSRFilter || InpUseSRStop)
+      PrintFormat("Gold Dominator S/R active | entry-filter=%s stop=%s | mode=%s zone=%dpts stopBuffer=%dpts stopMax=%dpts",
+                  (InpUseSRFilter?"ON":"off"), (InpUseSRStop?"ON":"off"),
+                  EnumToString(InpSRMode), InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts);
    PrintLotLadder();
 
    g_day = DayStart(TimeCurrent());
@@ -404,8 +411,8 @@ bool NearAnySRLevel(double price)
 //+------------------------------------------------------------------+
 bool SRAllowsEntry(int dir, double price)
   {
+   if(InpUseSRFilter || InpUseSRStop) RefreshSRLevels();  // keep levels fresh for either feature
    if(!InpUseSRFilter) return(true);       // filter disabled -> no restriction
-   RefreshSRLevels();
    if(g_srCount == 0) return(true);        // no levels yet (e.g. not enough history) -> don't block
    double zone = InpSRZonePts * _Point;
    for(int i=0;i<g_srCount;i++)
@@ -416,6 +423,42 @@ bool SRAllowsEntry(int dir, double price)
       if(dir<0 && lv >= price-zone) return(true);   // sell near/above price = resistance
      }
    return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Structure-based stop distance (points) for a position opening at   |
+//| `price` in direction `dir`. Places the stop just beyond the         |
+//| nearest qualifying S/R level - support below entry for a buy,       |
+//| resistance above entry for a sell - plus InpSRStopBufferPts, so a   |
+//| touch of the level doesn't stop the trade out, only a real break    |
+//| does. Returns 0 if no qualifying level exists within                |
+//| InpSRStopMaxPts; the caller then falls back to ATR/fixed points.    |
+//+------------------------------------------------------------------+
+double SRStopDistance(int dir, double price)
+  {
+   if(!InpUseSRStop) return(0);
+   if(g_srCount == 0) return(0);
+
+   double best = -1;
+   for(int i=0;i<g_srCount;i++)
+     {
+      double lv = g_srLevels[i];
+      if(dir>0 && lv < price)                        // support candidate (below entry)
+        {
+         double dist = price - lv;
+         if(best<0 || dist<best) best=dist;
+        }
+      if(dir<0 && lv > price)                        // resistance candidate (above entry)
+        {
+         double dist = lv - price;
+         if(best<0 || dist<best) best=dist;
+        }
+     }
+   if(best < 0) return(0);                            // nothing on the protective side -> fall back
+
+   double pts = best/_Point + InpSRStopBufferPts;
+   if(pts > InpSRStopMaxPts) return(0);                // level too far away to be a useful stop
+   return(pts);
   }
 
 //+------------------------------------------------------------------+
@@ -626,12 +669,18 @@ void TryScalpEntry()
   }
 
 //+------------------------------------------------------------------+
-//| Current hard-SL distance in POINTS (0 = no stop). ATR mode:        |
-//| distance = InpATRMultiplier x ATR(InpATRTimeframe), floored by     |
-//| InpMinSLPoints; falls back to the fixed points if ATR isn't ready. |
+//| Current hard-SL distance in POINTS (0 = no stop). Priority:        |
+//| structure (nearest S/R level + buffer, if InpUseSRStop finds one)  |
+//| -> ATR(InpATRTimeframe) x InpATRMultiplier, floored by              |
+//| InpMinSLPoints -> fixed InpHardSLPoints. Each falls through to the |
+//| next when it isn't available/applicable, so a trade always gets a  |
+//| stop.                                                               |
 //+------------------------------------------------------------------+
-double HardSLPoints()
+double HardSLPoints(int dir, double price)
   {
+   double srPts = SRStopDistance(dir, price);
+   if(srPts > 0) return(srPts);
+
    if(InpUseATRStop && hATR!=INVALID_HANDLE)
      {
       double a[1];
@@ -670,7 +719,7 @@ void OpenScalp(int dir)
    double lot=NormalizeLot(g_initLot);               // fresh scalps use the (scaled) base lot
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl=0, tp=0;
-   double slPts=HardSLPoints();
+   double slPts=HardSLPoints(dir, price);
    if(slPts>0)
       sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
    double tpPts=ScalpTPPoints();
@@ -695,7 +744,7 @@ void OpenFirst(int dir)
    double lot=NormalizeLot(g_initLot);
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double sl=0;
-   double slPts=HardSLPoints();
+   double slPts=HardSLPoints(dir, price);
    if(slPts>0)
       sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
    if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
@@ -739,7 +788,7 @@ void ManageDirection(int dir)
         {
          double lot=NormalizeLot(lLot*g_multiplier);
          double sl=0;
-         double slPts=HardSLPoints();
+         double slPts=HardSLPoints(dir, cur);
          if(slPts>0)
             sl=(dir>0)?cur-slPts*_Point:cur+slPts*_Point;
          if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
