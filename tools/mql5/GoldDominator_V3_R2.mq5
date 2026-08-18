@@ -20,7 +20,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Gold Dominator V3_R2 - Execution Desk"
-#property version   "1.50"
+#property version   "1.60"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -52,6 +52,7 @@ enum ENUM_SRMODE
 
 //==================== SIGNAL INPUTS (mirror .set) ==================
 input string          _s0            = "===== Signal ====="; // ---
+input bool             InpDebugLog   = true;         // print WHY each bar's entry was skipped (Experts log)
 input ENUM_ENTRYMODE  InpEntryMode   = ENTRY_M5_TREND_SCALP; // HOW it enters (test both)
 input int             InpScalpTPPoints = 130;       // scalp mode: fixed TP per trade (points)
 input ENUM_TIMEFRAMES InpStochTF     = PERIOD_M15;  // TF_Stoh
@@ -635,11 +636,20 @@ void OnTick()
    if(bar==g_lastBar) return;
    g_lastBar=bar;
 
-   if(!SessionOpen()) return;
+   if(!SessionOpen())
+     {
+      if(InpDebugLog) PrintFormat("SKIP: outside session hours (now=%d server hr, window %02d:00-%02d:00)",
+                                   TimeHour(TimeCurrent()), InpStartHour, InpEndHour);
+      return;
+     }
    if(InpMaxSpreadPts>0)
      {
       long spr=SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-      if(spr>InpMaxSpreadPts) return;
+      if(spr>InpMaxSpreadPts)
+        {
+         if(InpDebugLog) PrintFormat("SKIP: spread %d pts > max %d pts", spr, InpMaxSpreadPts);
+         return;
+        }
      }
 
    if(InpEntryMode==ENTRY_M5_TREND_SCALP)
@@ -669,26 +679,51 @@ void OnTick()
 void TryScalpEntry()
   {
    int trend = DragonState();
-   if(trend == 0) return;                            // no clear trend -> stand aside
+   if(trend == 0)
+     {
+      if(InpDebugLog) Print("SKIP: no clear Dragon trend (EMA flat/undecided)");
+      return;                                         // no clear trend -> stand aside
+     }
    int dir = (trend > 0) ? +1 : -1;
-   if(dir>0 && !InpTradeBuy)  return;
-   if(dir<0 && !InpTradeSell) return;
+   if(dir>0 && !InpTradeBuy)
+     { if(InpDebugLog) Print("SKIP: trend is BUY but Flag_Trade_Buy_ is false"); return; }
+   if(dir<0 && !InpTradeSell)
+     { if(InpDebugLog) Print("SKIP: trend is SELL but Flag_Trade_Sell_ is false"); return; }
 
    //--- stochastic filter: don't pile in at the exhaustion extreme
    double k[1];
    if(CopyBuffer(hStoch, MAIN_LINE, 1, 1, k) < 1) return;
-   if(dir>0 && k[0] >= InpUpLevel)   return;         // already overbought -> no new buy
-   if(dir<0 && k[0] <= InpDownLevel) return;         // already oversold  -> no new sell
+   if(dir>0 && k[0] >= InpUpLevel)
+     {
+      if(InpDebugLog) PrintFormat("SKIP: trend=BUY but stoch exhausted, k=%.2f >= UpLevel=%.1f", k[0], InpUpLevel);
+      return;                                          // already overbought -> no new buy
+     }
+   if(dir<0 && k[0] <= InpDownLevel)
+     {
+      if(InpDebugLog) PrintFormat("SKIP: trend=SELL but stoch exhausted, k=%.2f <= DownLevel=%.1f", k[0], InpDownLevel);
+      return;                                          // already oversold  -> no new sell
+     }
 
    //--- respect the per-direction position cap
    int cnt; double vol,wavg,lLot,lPrice;
    BasketInfo(dir, cnt, vol, wavg, lLot, lPrice);
-   if(cnt >= InpMaxPositions) return;
+   if(cnt >= InpMaxPositions)
+     {
+      if(InpDebugLog) PrintFormat("SKIP: %s position cap reached (%d/%d)", (dir>0?"BUY":"SELL"), cnt, InpMaxPositions);
+      return;
+     }
 
    //--- S/R filter: only buy near support, only sell near resistance
    double price = (dir>0) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   if(!SRAllowsEntry(dir, price)) return;
+   if(!SRAllowsEntry(dir, price))
+     {
+      if(InpDebugLog) PrintFormat("SKIP: %s blocked by S/R filter (price=%.2f, no qualifying level within %dpts)",
+                                   (dir>0?"BUY":"SELL"), price, InpSRZonePts);
+      return;
+     }
 
+   if(InpDebugLog) PrintFormat("ENTRY: %s (trend agrees, k=%.2f, cnt=%d/%d, S/R OK) @ %.2f",
+                                (dir>0?"BUY":"SELL"), k[0], cnt, InpMaxPositions, price);
    OpenScalp(dir);
   }
 
