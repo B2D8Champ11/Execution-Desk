@@ -20,7 +20,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Gold Dominator V3_R2 - Execution Desk"
-#property version   "1.40"
+#property version   "1.50"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -75,7 +75,9 @@ input ENUM_APPLIED_PRICE InpDragonPrice = PRICE_CLOSE; // proxy MA price
 input string          _sSR           = "----- Support/Resistance filter -----"; // ---
 input bool            InpUseSRFilter = false;       // only enter near a pivot S/R zone
 input ENUM_SRMODE     InpSRMode      = SR_SWING_LEVELS; // which levels to use (real higher-TF structure, not a daily formula)
-input ENUM_TIMEFRAMES InpSRSwingTF   = PERIOD_H1;   // swing-mode timeframe - THIS is your "higher time structure"
+input ENUM_TIMEFRAMES InpSRSwingTF   = PERIOD_H1;   // swing timeframe #1 - your higher-TF structure
+input bool            InpSRUseTF2    = true;        // also combine a second swing timeframe (union, more levels = more trades)
+input ENUM_TIMEFRAMES InpSRSwingTF2  = PERIOD_H4;   // swing timeframe #2 - combined with TF1, not an AND-gate
 input int             InpSRZonePts   = 150;         // "near" = within this many points of a level
 input bool            InpDrawSRLines = true;        // draw the levels on the chart (visual/debug)
 input bool            InpUseSRStop   = false;       // place the hard SL just beyond the nearest S/R level
@@ -210,9 +212,11 @@ int OnInit()
                               EnumToString(InpDragonTF), InpScalpTPPoints)
                : "SIGNAL CROSS (passive stochastic trigger)");
    if(InpUseSRFilter || InpUseSRStop)
-      PrintFormat("Gold Dominator S/R active | entry-filter=%s stop=%s | mode=%s (swingTF=%s) zone=%dpts stopBuffer=%dpts stopMax=%dpts",
+      PrintFormat("Gold Dominator S/R active | entry-filter=%s stop=%s | mode=%s TF1=%s%s zone=%dpts stopBuffer=%dpts stopMax=%dpts",
                   (InpUseSRFilter?"ON":"off"), (InpUseSRStop?"ON":"off"),
-                  EnumToString(InpSRMode), EnumToString(InpSRSwingTF), InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts);
+                  EnumToString(InpSRMode), EnumToString(InpSRSwingTF),
+                  (InpSRUseTF2 ? " +TF2="+EnumToString(InpSRSwingTF2) : ""),
+                  InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts);
    PrintLotLadder();
 
    g_day = DayStart(TimeCurrent());
@@ -308,7 +312,7 @@ int DragonState()
 //| pivot/swing zones for. It changes nothing about sizing, exits, or  |
 //| the martingale/safety code below - it's purely an extra entry gate.|
 //+------------------------------------------------------------------+
-double g_srLevels[7];      // up to 7 levels (pivots: S3,S2,S1,P,R1,R2,R3)
+double g_srLevels[16];     // pivots use 7; swing mode can hold up to ~7 per timeframe x 2 timeframes
 int    g_srCount = 0;
 datetime g_srCalcDay = 0;  // recompute once per new day
 
@@ -335,27 +339,25 @@ void ComputeDailyPivots()
 
 //+------------------------------------------------------------------+
 //| Recent swing highs/lows (simple fractal: a bar whose high/low is   |
-//| the extreme of its lookback-bar neighbourhood on each side), on     |
-//| InpSRSwingTF - this is the actual "higher timeframe structure":     |
-//| real swing points on H1 (or whatever you set), not a formula off    |
-//| a single prior day. Adapts to recent structure instead of a fixed   |
-//| calculation.                                                        |
+//| the extreme of its lookback-bar neighbourhood on each side) on ONE  |
+//| timeframe, appended into g_srLevels[] starting at g_srCount. Real   |
+//| swing points, not a formula off a single prior day.                 |
 //+------------------------------------------------------------------+
-void ComputeSwingLevels()
+void AppendSwingLevels(ENUM_TIMEFRAMES tf)
   {
-   g_srCount = 0;
    int lookback = 5;                 // bars each side to confirm a fractal
    int scanBars = 200;                // how far back to search for swings
-   int total = MathMin(scanBars, iBars(_Symbol, InpSRSwingTF)-lookback*2-2);
+   int cap = ArraySize(g_srLevels);
+   int total = MathMin(scanBars, iBars(_Symbol, tf)-lookback*2-2);
    if(total <= 0) return;
 
    double hi[], lo[];
-   if(CopyHigh(_Symbol, InpSRSwingTF, 1, total+lookback*2, hi) < total) return;
-   if(CopyLow (_Symbol, InpSRSwingTF, 1, total+lookback*2, lo) < total) return;
+   if(CopyHigh(_Symbol, tf, 1, total+lookback*2, hi) < total) return;
+   if(CopyLow (_Symbol, tf, 1, total+lookback*2, lo) < total) return;
    ArraySetAsSeries(hi, false);
    ArraySetAsSeries(lo, false);
 
-   for(int i=lookback; i<total && g_srCount<7; i++)
+   for(int i=lookback; i<total && g_srCount<cap; i++)
      {
       bool isHigh=true, isLow=true;
       for(int j=1;j<=lookback;j++)
@@ -363,9 +365,22 @@ void ComputeSwingLevels()
          if(hi[i] <= hi[i-j] || hi[i] <= hi[i+j]) isHigh=false;
          if(lo[i] >= lo[i-j] || lo[i] >= lo[i+j]) isLow=false;
         }
-      if(isHigh) g_srLevels[g_srCount++] = hi[i];
-      if(isLow && g_srCount<7) g_srLevels[g_srCount++] = lo[i];
+      if(isHigh && g_srCount<cap) g_srLevels[g_srCount++] = hi[i];
+      if(isLow  && g_srCount<cap) g_srLevels[g_srCount++] = lo[i];
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Combines swing levels from TF1 and (optionally) TF2 into one       |
+//| merged pool - a level from EITHER timeframe qualifies (union, not  |
+//| an AND-gate), so adding a second timeframe means more coverage and |
+//| more trade opportunities, not fewer.                               |
+//+------------------------------------------------------------------+
+void ComputeSwingLevels()
+  {
+   g_srCount = 0;
+   AppendSwingLevels(InpSRSwingTF);
+   if(InpSRUseTF2) AppendSwingLevels(InpSRSwingTF2);
   }
 
 //+------------------------------------------------------------------+
