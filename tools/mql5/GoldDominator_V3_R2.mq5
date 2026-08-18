@@ -20,7 +20,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Gold Dominator V3_R2 - Execution Desk"
-#property version   "1.30"
+#property version   "1.40"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -74,7 +74,8 @@ input ENUM_APPLIED_PRICE InpDragonPrice = PRICE_CLOSE; // proxy MA price
 
 input string          _sSR           = "----- Support/Resistance filter -----"; // ---
 input bool            InpUseSRFilter = false;       // only enter near a pivot S/R zone
-input ENUM_SRMODE     InpSRMode      = SR_DAILY_PIVOTS; // which levels to use
+input ENUM_SRMODE     InpSRMode      = SR_SWING_LEVELS; // which levels to use (real higher-TF structure, not a daily formula)
+input ENUM_TIMEFRAMES InpSRSwingTF   = PERIOD_H1;   // swing-mode timeframe - THIS is your "higher time structure"
 input int             InpSRZonePts   = 150;         // "near" = within this many points of a level
 input bool            InpDrawSRLines = true;        // draw the levels on the chart (visual/debug)
 input bool            InpUseSRStop   = false;       // place the hard SL just beyond the nearest S/R level
@@ -209,9 +210,9 @@ int OnInit()
                               EnumToString(InpDragonTF), InpScalpTPPoints)
                : "SIGNAL CROSS (passive stochastic trigger)");
    if(InpUseSRFilter || InpUseSRStop)
-      PrintFormat("Gold Dominator S/R active | entry-filter=%s stop=%s | mode=%s zone=%dpts stopBuffer=%dpts stopMax=%dpts",
+      PrintFormat("Gold Dominator S/R active | entry-filter=%s stop=%s | mode=%s (swingTF=%s) zone=%dpts stopBuffer=%dpts stopMax=%dpts",
                   (InpUseSRFilter?"ON":"off"), (InpUseSRStop?"ON":"off"),
-                  EnumToString(InpSRMode), InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts);
+                  EnumToString(InpSRMode), EnumToString(InpSRSwingTF), InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts);
    PrintLotLadder();
 
    g_day = DayStart(TimeCurrent());
@@ -334,21 +335,23 @@ void ComputeDailyPivots()
 
 //+------------------------------------------------------------------+
 //| Recent swing highs/lows (simple fractal: a bar whose high/low is   |
-//| the extreme of its InpSRSwingLookback-bar neighbourhood on each    |
-//| side). Cheaper alternative to pivots; adapts to recent structure   |
-//| instead of yesterday's range.                                     |
+//| the extreme of its lookback-bar neighbourhood on each side), on     |
+//| InpSRSwingTF - this is the actual "higher timeframe structure":     |
+//| real swing points on H1 (or whatever you set), not a formula off    |
+//| a single prior day. Adapts to recent structure instead of a fixed   |
+//| calculation.                                                        |
 //+------------------------------------------------------------------+
 void ComputeSwingLevels()
   {
    g_srCount = 0;
    int lookback = 5;                 // bars each side to confirm a fractal
    int scanBars = 200;                // how far back to search for swings
-   int total = MathMin(scanBars, iBars(_Symbol, PERIOD_H1)-lookback*2-2);
+   int total = MathMin(scanBars, iBars(_Symbol, InpSRSwingTF)-lookback*2-2);
    if(total <= 0) return;
 
    double hi[], lo[];
-   if(CopyHigh(_Symbol, PERIOD_H1, 1, total+lookback*2, hi) < total) return;
-   if(CopyLow (_Symbol, PERIOD_H1, 1, total+lookback*2, lo) < total) return;
+   if(CopyHigh(_Symbol, InpSRSwingTF, 1, total+lookback*2, hi) < total) return;
+   if(CopyLow (_Symbol, InpSRSwingTF, 1, total+lookback*2, lo) < total) return;
    ArraySetAsSeries(hi, false);
    ArraySetAsSeries(lo, false);
 
@@ -404,10 +407,15 @@ bool NearAnySRLevel(double price)
   }
 
 //+------------------------------------------------------------------+
-//| Entry gate: for a BUY, price must be near a level that sits AT or  |
-//| BELOW current price (support); for a SELL, near a level AT or      |
-//| ABOVE current price (resistance). Keeps buys off resistance and    |
-//| sells off support, not just "near any line".                       |
+//| Entry gate: a level is SUPPORT only while price sits AT/ABOVE it   |
+//| (within the zone) - buys only. A level is RESISTANCE only while    |
+//| price sits AT/BELOW it (within the zone) - sells only. These two   |
+//| ranges are mutually exclusive per level (they only meet at price   |
+//| == level), so a single nearby level can no longer wave through     |
+//| BOTH a buy and a sell - previously it did, which is exactly how a  |
+//| sell fired while price was sitting on support. Selling only        |
+//| becomes valid again once price is on the far side of the level     |
+//| (a genuine break, not just a touch).                                |
 //+------------------------------------------------------------------+
 bool SRAllowsEntry(int dir, double price)
   {
@@ -418,9 +426,10 @@ bool SRAllowsEntry(int dir, double price)
    for(int i=0;i<g_srCount;i++)
      {
       double lv = g_srLevels[i];
-      if(MathAbs(price - lv) > zone) continue;
-      if(dir>0 && lv <= price+zone) return(true);   // buy near/below price = support
-      if(dir<0 && lv >= price-zone) return(true);   // sell near/above price = resistance
+      //--- price at/above the level, within the zone = SUPPORT -> buys only
+      if(dir>0 && price>=lv && price<=lv+zone) return(true);
+      //--- price at/below the level, within the zone = RESISTANCE -> sells only
+      if(dir<0 && price<=lv && price>=lv-zone) return(true);
      }
    return(false);
   }
