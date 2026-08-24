@@ -20,7 +20,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Gold Dominator V3_R2 - Execution Desk"
-#property version   "1.60"
+#property version   "1.70"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -130,6 +130,7 @@ input int             InpTrailDist   = 100;         // iTD
 input string          _s4            = "===== Safety (both active) ====="; // ---
 input bool            InpUseBasketMoneyStop = true; // close whole cycle at a max floating loss
 input double          InpBasketMaxLoss = 50.0;      // $ max loss for one basket/cycle
+input double          InpGridAddMaxLossPct = 60.0;  // block new grid adds once floating loss >= this % of BasketMaxLoss
 input bool            InpUseDailyMoneyStop = true;  // halt for the day at a money loss
 input double          InpDailyMaxLoss  = 100.0;     // $ daily loss limit
 input bool            InpUseDailyPctStop = true;    // halt for the day at a % drawdown
@@ -838,7 +839,16 @@ void ManageDirection(int dir)
      }
 
    //--- grid add (only in martingale/grid mode)
-   if(InpMartingaleMode && cnt<InpMaxPositions)
+   //    [SAFETY] once floating loss is already most of the way to the basket
+   //    money-stop, stop adding new (bigger) legs — let the money-stop close
+   //    the basket at its cap instead of the grid piling one more large lot
+   //    into a fast move right before the close fires.
+   if(InpUseBasketMoneyStop && InpGridAddMaxLossPct>0 && bp<=-(g_basketMaxLoss*InpGridAddMaxLossPct/100.0))
+     {
+      if(InpDebugLog) PrintFormat("GRID: add blocked, dir=%d floating=%.2f already past %.0f%% of basket cap %.2f",
+                                   dir, bp, InpGridAddMaxLossPct, g_basketMaxLoss);
+     }
+   else if(InpMartingaleMode && cnt<InpMaxPositions)
      {
       double cur=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
       double adversePts=(dir>0)?(lPrice-cur)/_Point:(cur-lPrice)/_Point;
