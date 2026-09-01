@@ -781,8 +781,12 @@ void OnTick()
 
    if(!SessionOpen())
      {
-      if(InpDebugLog) PrintFormat("SKIP: outside session hours (now=%d server hr, window %02d:00-%02d:00)",
-                                   TimeHour(TimeCurrent()), InpStartHour, InpEndHour);
+      if(InpDebugLog)
+        {
+         MqlDateTime dtNow; TimeToStruct(TimeCurrent(), dtNow);
+         PrintFormat("SKIP: outside session hours (now=%d server hr, window %02d:00-%02d:00)",
+                     dtNow.hour, InpStartHour, InpEndHour);
+        }
       return;
      }
    if(InpMaxSpreadPts>0)
