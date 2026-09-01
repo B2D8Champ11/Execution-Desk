@@ -13,6 +13,9 @@
 //|     - daily loss limit (money AND percent, whichever first)       |
 //|     - equity drawdown kill-switch                                 |
 //|     - MartingaleMode toggle: capped grid  <->  single-shot fixed  |
+//|     - prop firm challenge compliance mode (InpChallengeMode):     |
+//|       static account-wide floor, per-trade % risk cap, guaranteed |
+//|       SL on every position, high-impact news blackout             |
 //|                                                                  |
 //|   NOTE: not compiled/tested in this environment. Compile in       |
 //|   MetaEditor (F7) and validate in Strategy Tester before live.    |
@@ -20,7 +23,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Gold Dominator V3_R2 - Execution Desk"
-#property version   "1.70"
+#property version   "1.80"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -139,6 +142,26 @@ input int             InpMaxSpreadPts  = 0;         // MaxSpred (0 = ignore)
 input int             InpStartHour     = 9;         // Start_Hour (matches real EA: 09:00 server)
 input int             InpEndHour       = 12;        // End_Hour   (real EA stops entries ~12:00)
 
+//==================== PROP FIRM CHALLENGE COMPLIANCE =============
+// Tuned for The5ers Bootcamp: 5% static account drawdown per step (4% once
+// funded), mandatory visible SL on every position, 2% max risk per trade
+// (default set to 1% here - half the ceiling, since a martingale grid stacks
+// several "trades" worth of risk at once), no orders within 2min of high-
+// impact news. Set InpChallengeMode=false to fall back to pre-challenge
+// behaviour (only the existing basket/daily safety nets apply).
+input string          _s5              = "===== Prop firm challenge compliance ====="; // ---
+input bool            InpChallengeMode = true;      // master switch for everything in this section
+input double          InpChallengeStartBalance = 5000; // set to THIS account's starting balance (5k/10k/20k...)
+input double          InpChallengeMaxDDPct = 5.0;   // static account-wide loss limit (5% eval, 4% once funded)
+input double          InpChallengeBufferPct = 0.5;  // close out this much % of start balance BEFORE the true floor
+input double          InpMaxRiskPct    = 1.0;       // max % of balance risked on any single position/add
+input int             InpForceSLFloorPts = 50;      // absolute floor - a position NEVER opens without an SL >= this
+input bool            InpUseNewsFilter = true;      // block new orders around high-impact news
+input string          InpNewsCurrency  = "USD";     // currency to watch (XAUUSD is USD-quoted)
+input int             InpNewsBlockMinsBefore = 2;   // no new orders from this many minutes before...
+input int             InpNewsBlockMinsAfter  = 2;   // ...to this many minutes after a qualifying event
+input ENUM_CALENDAR_EVENT_IMPORTANCE InpNewsMinImportance = CALENDAR_IMPORTANCE_HIGH; // block at/above this importance
+
 //==================== STATE ======================================
 int      hStoch  = INVALID_HANDLE;
 int      hDragon = INVALID_HANDLE;
@@ -158,6 +181,10 @@ datetime g_day     = 0;
 double   g_dayStartEquity = 0;
 double   g_equityPeak     = 0;
 bool     g_haltedToday    = false;
+//--- challenge compliance state
+double   g_challengeFloor  = 0.0;   // InpChallengeStartBalance x (1 - MaxDDPct/100), fixed for the account's life
+bool     g_challengeHalted = false; // permanent (not daily) - once true, stays flat until manually reset
+string   g_challengeHaltGV = "";    // GlobalVariable name used to persist the halt across restarts
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -224,6 +251,22 @@ int OnInit()
    g_day = DayStart(TimeCurrent());
    g_dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    g_equityPeak     = g_dayStartEquity;
+
+   //--- prop firm challenge compliance: static account-wide floor, fixed once at start
+   if(InpChallengeMode)
+     {
+      g_challengeFloor  = InpChallengeStartBalance * (1.0 - InpChallengeMaxDDPct/100.0);
+      g_challengeHaltGV = StringFormat("GD_ChallengeHalt_%I64d_%s", InpMagic, _Symbol);
+      g_challengeHalted = (GlobalVariableCheck(g_challengeHaltGV) && GlobalVariableGet(g_challengeHaltGV) > 0.5);
+      PrintFormat("Challenge compliance ON | start=%.2f maxDD=%.1f%% -> static floor=%.2f (halt at floor+%.1f%% buffer) | maxRisk=%.1f%%/trade | forceSL>=%dpts | newsFilter=%s (%s, %dm/%dm, >=%s)",
+                  InpChallengeStartBalance, InpChallengeMaxDDPct, g_challengeFloor, InpChallengeBufferPct,
+                  InpMaxRiskPct, InpForceSLFloorPts,
+                  (InpUseNewsFilter?"ON":"off"), InpNewsCurrency, InpNewsBlockMinsBefore, InpNewsBlockMinsAfter,
+                  EnumToString(InpNewsMinImportance));
+      if(g_challengeHalted)
+         PrintFormat("Challenge halt flag already set from a previous run - staying flat. Only clear GlobalVariable '%s' if you're certain the floor was NOT actually breached (e.g. reusing this chart for a new account).",
+                     g_challengeHaltGV);
+     }
    return(INIT_SUCCEEDED);
   }
 
@@ -592,6 +635,84 @@ double NormalizeLot(double lot)
   }
 
 //+------------------------------------------------------------------+
+//| $ value of a 1-point move for a 1.0 lot position, broker-agnostic.|
+//+------------------------------------------------------------------+
+double PointValuePerLot()
+  {
+   double tickValue=SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize =SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize<=0.0) return(0.0);
+   return(tickValue*(_Point/tickSize));
+  }
+
+//+------------------------------------------------------------------+
+//| [SAFETY] Cap a candidate lot so $ risk to its stop never exceeds  |
+//| InpMaxRiskPct of current balance (The5ers: 2% ceiling per trade;  |
+//| default here is 1%, since a martingale grid stacks several legs). |
+//| Rounds DOWN only, so the cap is never breached by rounding.       |
+//| Returns 0 if even the broker's minimum lot would risk too much -  |
+//| caller must skip the trade rather than open oversized.            |
+//+------------------------------------------------------------------+
+double RiskCappedLot(double rawLot, double slPts)
+  {
+   if(!InpChallengeMode || InpMaxRiskPct<=0.0 || slPts<=0.0) return(rawLot);
+   double ptVal=PointValuePerLot();
+   if(ptVal<=0.0) return(rawLot);        // can't price it - don't block, other nets still apply
+   double riskCash=AccountInfoDouble(ACCOUNT_BALANCE)*InpMaxRiskPct/100.0;
+   double maxLot=riskCash/(slPts*ptVal);
+   double step=SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP); if(step<=0) step=0.01;
+   double mn  =SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double flooredMax=MathFloor(maxLot/step)*step;
+   if(flooredMax < mn)
+     {
+      if(InpDebugLog) PrintFormat("RISK CAP: even min lot %.2f would risk more than %.1f%% of balance at %.0f pts SL -> skip",
+                                   mn, InpMaxRiskPct, slPts);
+      return(0.0);
+     }
+   return(NormalizeLot(MathMin(rawLot, flooredMax)));
+  }
+
+//+------------------------------------------------------------------+
+//| [SAFETY] Absolute floor - a position NEVER opens with SL<=0.      |
+//+------------------------------------------------------------------+
+double ClampSLFloor(double pts)
+  {
+   if(InpChallengeMode && pts < InpForceSLFloorPts) return((double)InpForceSLFloorPts);
+   return(pts);
+  }
+
+//+------------------------------------------------------------------+
+//| [SAFETY] True while a high-impact InpNewsCurrency event is within |
+//| the block window - The5ers forbids order execution 2min either    |
+//| side of high-impact news.                                         |
+//+------------------------------------------------------------------+
+bool NewsBlackoutActive()
+  {
+   if(!InpChallengeMode || !InpUseNewsFilter) return(false);
+   datetime now=TimeCurrent();
+   datetime from=now-(InpNewsBlockMinsBefore+5)*60;
+   datetime to  =now+(InpNewsBlockMinsAfter +5)*60;
+   MqlCalendarValue vals[];
+   int n=CalendarValueHistory(vals, from, to, NULL, InpNewsCurrency);
+   for(int i=0; i<n; i++)
+     {
+      MqlCalendarEvent ev;
+      if(!CalendarEventById(vals[i].event_id, ev)) continue;
+      if(ev.importance < InpNewsMinImportance) continue;
+      datetime evTime=vals[i].time;
+      if(now>=evTime-InpNewsBlockMinsBefore*60 && now<=evTime+InpNewsBlockMinsAfter*60)
+        {
+         if(InpDebugLog) PrintFormat("NEWS BLOCK: %s high-impact event at %s, now %s within -%dm/+%dm window",
+                                      InpNewsCurrency, TimeToString(evTime,TIME_DATE|TIME_MINUTES),
+                                      TimeToString(now,TIME_DATE|TIME_MINUTES),
+                                      InpNewsBlockMinsBefore, InpNewsBlockMinsAfter);
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
 void OnTick()
   {
    //--- day rollover: reset the daily halt & baselines
@@ -606,6 +727,25 @@ void OnTick()
 
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    if(equity>g_equityPeak) g_equityPeak=equity;
+
+   //================= CHALLENGE FLOOR [most severe - checked first] =
+   // Static, account-wide, never resets: once equity crosses the challenge's
+   // own loss limit the step/account has already failed, so this halts for
+   // good (persisted via GlobalVariable) rather than resuming next day.
+   if(InpChallengeMode)
+     {
+      double buffer = InpChallengeStartBalance*InpChallengeBufferPct/100.0;
+      double line   = g_challengeFloor + buffer;
+      if(!g_challengeHalted && equity<=line)
+        {
+         CloseAllMagic();
+         g_challengeHalted=true;
+         GlobalVariableSet(g_challengeHaltGV, 1.0);
+         PrintFormat("CHALLENGE HALT: equity %.2f <= floor+buffer %.2f (floor %.2f, buffer %.2f) - static account drawdown limit reached, trading stopped for good on this attach",
+                     equity, line, g_challengeFloor, buffer);
+        }
+      if(g_challengeHalted){ CloseAllMagic(); return; }
+     }
 
    //================= SAFETY: whichever limit trips first ===========
    double dayLoss = g_dayStartEquity - equity;                 // >0 means down on the day
@@ -661,6 +801,7 @@ void OnTick()
      {
       int sig=Signal();                              // passive: wait for a stochastic cross
       if(sig==0) return;
+      if(NewsBlackoutActive()) return;
       int cnt; double vol,wavg,lLot,lPrice;
       BasketInfo(sig, cnt, vol, wavg, lLot, lPrice);
       if(cnt==0)
@@ -679,6 +820,11 @@ void OnTick()
 //+------------------------------------------------------------------+
 void TryScalpEntry()
   {
+   if(NewsBlackoutActive())
+     {
+      if(InpDebugLog) Print("SKIP: news blackout window active");
+      return;
+     }
    int trend = DragonState();
    if(trend == 0)
      {
@@ -739,7 +885,7 @@ void TryScalpEntry()
 double HardSLPoints(int dir, double price)
   {
    double srPts = SRStopDistance(dir, price);
-   if(srPts > 0) return(srPts);
+   if(srPts > 0) return(ClampSLFloor(srPts));
 
    if(InpUseATRStop && hATR!=INVALID_HANDLE)
      {
@@ -748,10 +894,10 @@ double HardSLPoints(int dir, double price)
         {
          double pts=(a[0]/_Point)*InpATRMultiplier;
          if(pts < InpMinSLPoints) pts=InpMinSLPoints;
-         return(pts);
+         return(ClampSLFloor(pts));
         }
      }
-   return((double)InpHardSLPoints);                  // fixed fallback (0 = none)
+   return(ClampSLFloor((double)InpHardSLPoints));    // fixed fallback (0 = none unless InpChallengeMode forces a floor)
   }
 
 //+------------------------------------------------------------------+
@@ -776,10 +922,11 @@ double ScalpTPPoints()
 //+------------------------------------------------------------------+
 void OpenScalp(int dir)
   {
-   double lot=NormalizeLot(g_initLot);               // fresh scalps use the (scaled) base lot
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double sl=0, tp=0;
    double slPts=HardSLPoints(dir, price);
+   double lot=RiskCappedLot(NormalizeLot(g_initLot), slPts); // fresh scalps use the (scaled) base lot, then risk-capped
+   if(lot<=0.0) return;                                // risk cap: no valid size fits InpMaxRiskPct
+   double sl=0, tp=0;
    if(slPts>0)
       sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
    double tpPts=ScalpTPPoints();
@@ -801,10 +948,11 @@ bool SessionOpen()
 //+------------------------------------------------------------------+
 void OpenFirst(int dir)
   {
-   double lot=NormalizeLot(g_initLot);
    double price=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double sl=0;
    double slPts=HardSLPoints(dir, price);
+   double lot=RiskCappedLot(NormalizeLot(g_initLot), slPts);
+   if(lot<=0.0) return;                                // risk cap: no valid size fits InpMaxRiskPct
+   double sl=0;
    if(slPts>0)
       sl=(dir>0)?price-slPts*_Point:price+slPts*_Point;
    if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
@@ -853,15 +1001,23 @@ void ManageDirection(int dir)
       double cur=(dir>0)?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID);
       double adversePts=(dir>0)?(lPrice-cur)/_Point:(cur-lPrice)/_Point;
       double need=NextDistance(cnt);
-      if(adversePts>=need)
+      if(adversePts>=need && !NewsBlackoutActive())
         {
-         double lot=NormalizeLot(lLot*g_multiplier);
-         double sl=0;
          double slPts=HardSLPoints(dir, cur);
-         if(slPts>0)
-            sl=(dir>0)?cur-slPts*_Point:cur+slPts*_Point;
-         if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
-         else      trade.Sell(lot,_Symbol,0,sl,0,InpComment);
+         double lot=RiskCappedLot(NormalizeLot(lLot*g_multiplier), slPts);
+         if(lot<=0.0)
+           {
+            if(InpDebugLog) PrintFormat("GRID: add blocked by risk cap, dir=%d (no valid lot fits %.1f%% risk at %.0f pts SL)",
+                                         dir, InpMaxRiskPct, slPts);
+           }
+         else
+           {
+            double sl=0;
+            if(slPts>0)
+               sl=(dir>0)?cur-slPts*_Point:cur+slPts*_Point;
+            if(dir>0) trade.Buy (lot,_Symbol,0,sl,0,InpComment);
+            else      trade.Sell(lot,_Symbol,0,sl,0,InpComment);
+           }
         }
      }
 
