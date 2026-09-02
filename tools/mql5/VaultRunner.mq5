@@ -25,7 +25,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Vault Runner - Execution Desk"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -60,6 +60,7 @@ input string          _s0            = "===== Signal ====="; // ---
 input bool             InpDebugLog   = true;         // print WHY each bar's entry was skipped (Experts log)
 input ENUM_ENTRYMODE  InpEntryMode   = ENTRY_M5_TREND_SCALP; // HOW it enters (test both)
 input int             InpScalpTPPoints = 130;       // scalp mode: fixed TP per trade (points)
+input int             InpMinBarsBetweenScalps = 3;  // fresh scalps: require this many InpDragonTF bars since the last one per direction (0 = every bar)
 input ENUM_TIMEFRAMES InpStochTF     = PERIOD_M15;  // TF_Stoh
 input int             InpK           = 7;           // KPeriod
 input int             InpD           = 1;           // DPeriod
@@ -179,6 +180,7 @@ double   g_basketTP     = 5.0;
 double   g_basketMaxLoss= 50.0;
 double   g_dailyMaxLoss = 100.0;
 datetime g_lastBar = 0;
+datetime g_lastScalpTime[2] = {0,0};   // [0]=last SELL fresh-scalp open time, [1]=last BUY (cooldown gate)
 datetime g_day     = 0;
 double   g_dayStartEquity = 0;
 double   g_equityPeak     = 0;
@@ -866,6 +868,22 @@ void TryScalpEntry()
       return;
      }
 
+   //--- cooldown: don't open a fresh scalp every single bar just because the
+   //    trend hasn't flipped - require a few InpDragonTF bars to pass since
+   //    the last fresh scalp in this direction.
+   int idx=(dir>0)?1:0;
+   if(InpMinBarsBetweenScalps>0 && g_lastScalpTime[idx]>0)
+     {
+      long elapsedSec=(long)(TimeCurrent()-g_lastScalpTime[idx]);
+      long needSec=(long)InpMinBarsBetweenScalps*PeriodSeconds(InpDragonTF);
+      if(elapsedSec<needSec)
+        {
+         if(InpDebugLog) PrintFormat("SKIP: %s cooldown active (%ds of %ds since last fresh scalp)",
+                                      (dir>0?"BUY":"SELL"), elapsedSec, needSec);
+         return;
+        }
+     }
+
    //--- S/R filter: only buy near support, only sell near resistance
    double price = (dir>0) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
    if(!SRAllowsEntry(dir, price))
@@ -878,6 +896,7 @@ void TryScalpEntry()
    if(InpDebugLog) PrintFormat("ENTRY: %s (trend agrees, k=%.2f, cnt=%d/%d, S/R OK) @ %.2f",
                                 (dir>0?"BUY":"SELL"), k[0], cnt, InpMaxPositions, price);
    OpenScalp(dir);
+   g_lastScalpTime[idx]=TimeCurrent();
   }
 
 //+------------------------------------------------------------------+
