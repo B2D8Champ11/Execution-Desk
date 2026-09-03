@@ -25,7 +25,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Vault Runner - Execution Desk"
-#property version   "3.00"
+#property version   "3.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -93,6 +93,8 @@ input bool            InpDrawSRLines = true;        // draw the levels on the ch
 input bool            InpUseSRStop   = false;       // place the hard SL just beyond the nearest S/R level
 input int             InpSRStopBufferPts = 50;      // extra room beyond the level, so a touch isn't a break
 input int             InpSRStopMaxPts    = 2000;    // ignore a level farther than this (falls back to ATR/fixed)
+input int             InpSRMaxRetests    = 2;       // stop fading a level once it's rejected price this many times without breaking (0 = no limit)
+input int             InpSRRetestLookback= 300;     // bars (on InpSRSwingTF) scanned when counting rejections
 
 //==================== TRADE / SIZING ==============================
 input string          _s1            = "===== Position sizing ====="; // ---
@@ -248,11 +250,11 @@ int OnInit()
                               EnumToString(InpDragonTF), InpScalpTPPoints)
                : "SIGNAL CROSS (passive stochastic trigger)");
    if(InpUseSRFilter || InpUseSRStop)
-      PrintFormat("Vault Runner S/R active | entry-filter=%s stop=%s | mode=%s TF1=%s%s zone=%dpts stopBuffer=%dpts stopMax=%dpts",
+      PrintFormat("Vault Runner S/R active | entry-filter=%s stop=%s | mode=%s TF1=%s%s zone=%dpts stopBuffer=%dpts stopMax=%dpts maxRetests=%d",
                   (InpUseSRFilter?"ON":"off"), (InpUseSRStop?"ON":"off"),
                   EnumToString(InpSRMode), EnumToString(InpSRSwingTF),
                   (InpSRUseTF2 ? " +TF2="+EnumToString(InpSRSwingTF2) : ""),
-                  InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts);
+                  InpSRZonePts, InpSRStopBufferPts, InpSRStopMaxPts, InpSRMaxRetests);
    PrintLotLadder();
 
    g_day = DayStart(TimeCurrent());
@@ -494,11 +496,61 @@ bool SRAllowsEntry(int dir, double price)
      {
       double lv = g_srLevels[i];
       //--- price at/above the level, within the zone = SUPPORT -> buys only
-      if(dir>0 && price>=lv && price<=lv+zone) return(true);
+      if(dir>0 && price>=lv && price<=lv+zone)
+        {
+         if(InpSRMaxRetests>0 && CountRejections(lv,dir)>InpSRMaxRetests)
+           {
+            if(InpDebugLog) PrintFormat("SR: support %.2f already rejected >%d times without breaking - not fading it, skipping to next level", lv, InpSRMaxRetests);
+            continue;
+           }
+         return(true);
+        }
       //--- price at/below the level, within the zone = RESISTANCE -> sells only
-      if(dir<0 && price<=lv && price>=lv-zone) return(true);
+      if(dir<0 && price<=lv && price>=lv-zone)
+        {
+         if(InpSRMaxRetests>0 && CountRejections(lv,dir)>InpSRMaxRetests)
+           {
+            if(InpDebugLog) PrintFormat("SR: resistance %.2f already rejected >%d times without breaking - not fading it, skipping to next level", lv, InpSRMaxRetests);
+            continue;
+           }
+         return(true);
+        }
      }
    return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| [SAFETY] Count how many recent InpSRSwingTF bars touched `lv`      |
+//| (within InpSRZonePts) and got rejected without a decisive close    |
+//| through it. Stops counting the moment it finds a bar that DID      |
+//| close decisively through the level - that means the level already |
+//| broke, so older rejections before that break no longer apply.      |
+//| dir>0 -> lv is being read as support (rejections = failed breaks   |
+//| below); dir<0 -> lv is resistance (rejections = failed breaks up). |
+//+------------------------------------------------------------------+
+int CountRejections(double lv, int dir)
+  {
+   double zone=InpSRZonePts*_Point;
+   int available=iBars(_Symbol, InpSRSwingTF);
+   int bars=MathMin(InpSRRetestLookback, available-1);
+   int touches=0;
+   for(int i=1; i<=bars; i++)
+     {
+      double hi=iHigh(_Symbol, InpSRSwingTF, i);
+      double lo=iLow (_Symbol, InpSRSwingTF, i);
+      double cl=iClose(_Symbol, InpSRSwingTF, i);
+      if(dir>0)
+        {
+         if(cl<lv-zone) break;              // closed decisively below -> support already broke, stop
+         if(lo<=lv+zone) touches++;         // dipped into the zone and held
+        }
+      else
+        {
+         if(cl>lv+zone) break;              // closed decisively above -> resistance already broke, stop
+         if(hi>=lv-zone) touches++;         // poked into the zone and held
+        }
+     }
+   return(touches);
   }
 
 //+------------------------------------------------------------------+
