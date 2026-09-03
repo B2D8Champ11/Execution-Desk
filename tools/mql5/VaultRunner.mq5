@@ -25,7 +25,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Vault Runner - Execution Desk"
-#property version   "1.10"
+#property version   "1.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -61,6 +61,9 @@ input bool             InpDebugLog   = true;         // print WHY each bar's ent
 input ENUM_ENTRYMODE  InpEntryMode   = ENTRY_M5_TREND_SCALP; // HOW it enters (test both)
 input int             InpScalpTPPoints = 130;       // scalp mode: fixed TP per trade (points)
 input int             InpMinBarsBetweenScalps = 3;  // fresh scalps: require this many InpDragonTF bars since the last one per direction (0 = every bar)
+input bool            InpUsePriceCooldown = true;   // also skip a fresh scalp too close to where one just closed (ranging markets)
+input int             InpPriceCooldownPts = 150;    // "too close" = within this many points of that recent close
+input int             InpPriceCooldownMins = 20;    // how far back to look for a recent same-direction close
 input ENUM_TIMEFRAMES InpStochTF     = PERIOD_M15;  // TF_Stoh
 input int             InpK           = 7;           // KPeriod
 input int             InpD           = 1;           // DPeriod
@@ -717,6 +720,39 @@ bool NewsBlackoutActive()
   }
 
 //+------------------------------------------------------------------+
+//| [SAFETY] True if a same-direction position closed within the last |
+//| InpPriceCooldownMins minutes within InpPriceCooldownPts of `price`|
+//| - stops a ranging market re-selling/re-buying the same spot it    |
+//| just got stopped/closed out of, over and over.                    |
+//+------------------------------------------------------------------+
+bool PriceCooldownBlocks(int dir, double price)
+  {
+   if(!InpUsePriceCooldown || InpPriceCooldownPts<=0) return(false);
+   datetime from=TimeCurrent()-InpPriceCooldownMins*60;
+   if(!HistorySelect(from, TimeCurrent()+60)) return(false);
+   int total=HistoryDealsTotal();
+   //--- closing a BUY position takes a SELL deal, and vice versa
+   ENUM_DEAL_TYPE closingType=(dir>0)?DEAL_TYPE_SELL:DEAL_TYPE_BUY;
+   for(int i=total-1; i>=0; i--)
+     {
+      ulong tk=HistoryDealGetTicket(i);
+      if(tk==0) continue;
+      if(HistoryDealGetInteger(tk, DEAL_MAGIC)!=InpMagic) continue;
+      if(HistoryDealGetString(tk, DEAL_SYMBOL)!=_Symbol) continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk, DEAL_ENTRY)!=DEAL_ENTRY_OUT) continue;
+      if((ENUM_DEAL_TYPE)HistoryDealGetInteger(tk, DEAL_TYPE)!=closingType) continue;
+      double closePrice=HistoryDealGetDouble(tk, DEAL_PRICE);
+      if(MathAbs(price-closePrice)<=InpPriceCooldownPts*_Point)
+        {
+         if(InpDebugLog) PrintFormat("SKIP: %s price cooldown - closed a position %.1fpts from here (%.2f) within last %d min",
+                                      (dir>0?"BUY":"SELL"), MathAbs(price-closePrice)/_Point, closePrice, InpPriceCooldownMins);
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
 void OnTick()
   {
    //--- day rollover: reset the daily halt & baselines
@@ -892,6 +928,10 @@ void TryScalpEntry()
                                    (dir>0?"BUY":"SELL"), price, InpSRZonePts);
       return;
      }
+
+   //--- price cooldown: don't re-sell/re-buy the exact spot a position just
+   //    closed at (ranging markets flogging the same zone over and over)
+   if(PriceCooldownBlocks(dir, price)) return;
 
    if(InpDebugLog) PrintFormat("ENTRY: %s (trend agrees, k=%.2f, cnt=%d/%d, S/R OK) @ %.2f",
                                 (dir>0?"BUY":"SELL"), k[0], cnt, InpMaxPositions, price);
