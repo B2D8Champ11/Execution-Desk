@@ -25,7 +25,7 @@
 //|   with that probe first, then set SigMode/RequireDragon to match. |
 //+------------------------------------------------------------------+
 #property copyright "Vault Runner - Execution Desk"
-#property version   "1.20"
+#property version   "3.00"
 #property strict
 
 #include <Trade\Trade.mqh>
